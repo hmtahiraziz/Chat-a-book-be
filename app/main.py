@@ -16,7 +16,7 @@ from app.config import ADMIN_API_TOKEN, BOOKS_DIR, PROGRESS_DIR, public_vector_s
 from app.models import ChatRequest, ClassifyRequest, TtsRequest
 from app.services.classifier_service import classify_query
 from app.services.document_service import chunk_pages, extract_pages
-from app.services.manifest_service import get_book, list_books, upsert_book
+from app.services.manifest_service import get_book, list_books, pop_book, upsert_book
 from app.services.provider_service import Provider, get_chat_model, get_embedding_model
 from app.services.rag_chat_service import (
     build_full_rag_prompt,
@@ -561,6 +561,62 @@ async def ingest_book(
 @app.get("/books")
 def get_books() -> dict[str, Any]:
     return {"books": list(list_books().values())}
+
+
+@app.delete("/books/{book_id}")
+def delete_book(book_id: str) -> dict[str, Any]:
+    entry = get_book(book_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Book not found in library.")
+
+    embedding_provider: Provider = entry.get("embedding_provider") or "ollama"
+    pdf_path_raw = entry.get("pdf_path")
+    filename_for_ingest = entry.get("filename") or ""
+    safe_name = _sanitize_filename(str(filename_for_ingest) or "upload.pdf")
+
+    other_books_share_pdf = False
+    if pdf_path_raw:
+        for bid, other in list_books().items():
+            if bid == book_id:
+                continue
+            if other.get("pdf_path") == pdf_path_raw:
+                other_books_share_pdf = True
+                break
+
+    st = ingest_status.get(safe_name)
+    if (
+        st
+        and st.get("book_id") == book_id
+        and st.get("status") not in _TERMINAL_INGEST_STATUSES
+    ):
+        control = ingest_control.setdefault(safe_name, {"paused": False, "stop": False})
+        control["stop"] = True
+        control["paused"] = False
+
+    pop_book(book_id)
+    clear_book_index_vectors(book_id, embedding_provider)
+
+    progress_file = PROGRESS_DIR / f"{book_id}.progress.json"
+    removed_progress = False
+    if progress_file.exists():
+        progress_file.unlink()
+        removed_progress = True
+
+    removed_pdf = False
+    if pdf_path_raw and not other_books_share_pdf:
+        path = Path(str(pdf_path_raw))
+        if path.is_file():
+            path.unlink()
+            removed_pdf = True
+        ingest_status.pop(safe_name, None)
+        ingest_control.pop(safe_name, None)
+
+    return {
+        "book_id": book_id,
+        "removed_pdf": removed_pdf,
+        "removed_progress": removed_progress,
+        "embedding_provider": embedding_provider,
+    }
 
 
 @app.get("/admin/books/{book_id}/chunks")

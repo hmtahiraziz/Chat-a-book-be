@@ -31,3 +31,13 @@ def list_books() -> Dict[str, dict]:
 
 def get_book(book_id: str) -> dict | None:
     return _read_manifest().get(book_id)
+
+
+def pop_book(book_id: str) -> dict | None:
+    """Remove a book from the manifest and return its entry, if present."""
+    data = _read_manifest()
+    entry = data.pop(book_id, None)
+    if entry is None:
+        return None
+    _write_manifest(data)
+    return entry
