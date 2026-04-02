@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from langchain_community.vectorstores import FAISS
@@ -74,6 +74,21 @@ def _book_id_from_filename(filename: str) -> str:
     stem = Path(filename).stem.lower()
     safe = re.sub(r"[^a-z0-9]+", "-", stem).strip("-")
     return safe or f"book-{int(time.time())}"
+
+
+def _manifest_filename_and_safe_name(display_name: str | None, upload_filename: str) -> tuple[str, str]:
+    """(library label + download hint, ingest_status key / on-disk PDF basename)."""
+    if display_name and display_name.strip():
+        label = Path(display_name.strip()).name.strip()
+        if label:
+            if len(label) > 240:
+                raise HTTPException(
+                    status_code=400,
+                    detail="display_name is too long (max 240 characters).",
+                )
+            manifest = label if label.lower().endswith(".pdf") else f"{label}.pdf"
+            return manifest, _sanitize_filename(manifest)
+    return upload_filename, _sanitize_filename(upload_filename)
 
 
 def _load_progress(progress_file: Path) -> dict[str, Any]:
@@ -159,6 +174,7 @@ def control_ingest(filename: str, action: str) -> dict[str, Any]:
 @app.post("/books/ingest")
 async def ingest_book(
     file: UploadFile = File(...),
+    display_name: str | None = Form(None),
     embedding_provider: Provider = "ollama",
     max_pages: int | None = None,
     chunk_size: int | None = None,
@@ -187,7 +203,7 @@ async def ingest_book(
     if requests_per_second < 0:
         raise HTTPException(status_code=400, detail="requests_per_second must be >= 0")
 
-    safe_name = _sanitize_filename(file.filename)
+    manifest_filename, safe_name = _manifest_filename_and_safe_name(display_name, file.filename)
     base_book_id = _book_id_from_filename(safe_name)
     book_id = f"{base_book_id}-{embedding_provider}"
     BOOKS_DIR.mkdir(parents=True, exist_ok=True)
@@ -297,7 +313,7 @@ async def ingest_book(
             book_id,
             {
                 "book_id": book_id,
-                "filename": file.filename,
+                "filename": manifest_filename,
                 "pdf_path": str(path),
                 "pages": len(pages),
                 "chunks": len(docs),
@@ -535,7 +551,7 @@ async def ingest_book(
             book_id,
             {
                 "book_id": book_id,
-                "filename": file.filename,
+                "filename": manifest_filename,
                 "pdf_path": str(path),
                 "pages": len(pages),
                 "chunks": len(docs),

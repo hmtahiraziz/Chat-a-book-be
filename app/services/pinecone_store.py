@@ -7,7 +7,7 @@ import re
 from typing import Any, List
 
 from langchain_core.documents import Document
-from pinecone import Pinecone
+from pinecone import NotFoundException, Pinecone
 
 from app.config import PINECONE_API_KEY, pinecone_index_name_for_provider
 from app.services.provider_service import Provider
@@ -85,8 +85,13 @@ def upsert_embedding_batch(
 
 
 def delete_namespace(provider: Provider, namespace: str) -> None:
-    idx = get_raw_index(provider)
-    idx.delete(delete_all=True, namespace=namespace)
+    """Remove all vectors in a namespace. No-op if the Pinecone index does not exist."""
+    try:
+        idx = get_raw_index(provider)
+        idx.delete(delete_all=True, namespace=namespace)
+    except NotFoundException:
+        # Index missing (renamed, deleted, or wrong PINECONE_INDEX_* env); vectors are already gone.
+        return
 
 
 def namespace_has_vectors(provider: Provider, namespace: str) -> bool:
