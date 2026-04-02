@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+pymupdf
+faiss-cpu
+langchain
+langchain-text-splitters
+langchain-community
+langchain-ollama
+langchain-google-genai
+langchain-pinecone
+pinecone-client
+pydantic
