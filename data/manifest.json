@@ -10,5 +10,17 @@
     ],
     "indexed_at": 1774877650,
     "embedding_provider": "google"
+  },
+  "oldmansea-google": {
+    "book_id": "oldmansea-google",
+    "filename": "oldmansea.pdf",
+    "pdf_path": "/Users/macbookpro/Desktop/RAG/Book-Rag/ai-book-chatbot-v2/data/books/oldmansea.pdf",
+    "pages": 50,
+    "chunks": 207,
+    "chapters": [
+      "Unknown"
+    ],
+    "indexed_at": 1775152695,
+    "embedding_provider": "google"
   }
 }

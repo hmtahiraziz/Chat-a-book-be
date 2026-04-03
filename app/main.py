@@ -12,8 +12,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from langchain_community.vectorstores import FAISS
 
-from app.config import ADMIN_API_TOKEN, BOOKS_DIR, PROGRESS_DIR, public_vector_store_info, use_pinecone_vector_store
-from app.models import ChatRequest, ClassifyRequest, TtsRequest
+from app.config import (
+    ADMIN_API_TOKEN,
+    BOOKS_DIR,
+    PINECONE_API_KEY,
+    PINECONE_SERVERLESS_CLOUD,
+    PINECONE_SERVERLESS_REGION,
+    PROGRESS_DIR,
+    public_vector_store_info,
+    use_pinecone_vector_store,
+)
+from app.models import ChatRequest, ClassifyRequest, CreatePineconeIndexRequest, TtsRequest
 from app.services.classifier_service import classify_query
 from app.services.document_service import chunk_pages, extract_pages
 from app.services.manifest_service import get_book, list_books, pop_book, upsert_book
@@ -134,6 +143,45 @@ def root() -> dict[str, str]:
 def server_info() -> dict[str, Any]:
     """Public server metadata for the UI (vector DB mode, Pinecone index names). No secrets."""
     return public_vector_store_info()
+
+
+@app.post("/admin/pinecone/index")
+def admin_create_pinecone_index(
+    body: CreatePineconeIndexRequest,
+    _admin: None = Depends(verify_admin),
+) -> dict[str, Any]:
+    """Create a serverless Pinecone index (control plane). Requires PINECONE_API_KEY and optional X-Admin-Token."""
+    if not PINECONE_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="PINECONE_API_KEY is not set; cannot create Pinecone indexes.",
+        )
+    cloud = (body.cloud or PINECONE_SERVERLESS_CLOUD).strip()
+    region = (body.region or PINECONE_SERVERLESS_REGION).strip()
+    dim = body.effective_dimension()
+    try:
+        from pinecone.exceptions import PineconeApiException
+
+        from app.services.pinecone_store import create_serverless_pinecone_index
+
+        return create_serverless_pinecone_index(
+            body.name,
+            dim,
+            metric=body.metric,
+            cloud=cloud,
+            region=region,
+        )
+    except PineconeApiException as exc:
+        status = getattr(exc, "status", None)
+        msg = str(exc)
+        if status == 409 or "already exists" in msg.lower():
+            raise HTTPException(
+                status_code=409,
+                detail=f"A Pinecone index with this name already exists: {body.name!r}",
+            ) from exc
+        raise HTTPException(status_code=400, detail=msg) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/ingest/status")

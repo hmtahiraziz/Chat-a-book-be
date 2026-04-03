@@ -7,7 +7,7 @@ import re
 from typing import Any, List
 
 from langchain_core.documents import Document
-from pinecone import NotFoundException, Pinecone
+from pinecone import NotFoundException, Pinecone, ServerlessSpec
 
 from app.config import PINECONE_API_KEY, pinecone_index_name_for_provider
 from app.services.provider_service import Provider
@@ -43,6 +43,19 @@ def pinecone_namespace(book_id: str, embedding_provider: Provider) -> str:
 
 def chunk_id(global_ordinal: int) -> str:
     return f"c{global_ordinal:08d}"
+
+
+def _parse_pinecone_dimension_mismatch(exc: BaseException) -> tuple[str | None, str | None]:
+    """Returns (embedding_dim, index_dim) from Pinecone gRPC error text, if present."""
+    raw = str(exc)
+    m = re.search(
+        r"Vector dimension (\d+).*?dimension of the index (\d+)",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
 
 
 def _sanitize_metadata(meta: dict[str, Any]) -> dict[str, Any]:
@@ -81,7 +94,35 @@ def upsert_embedding_batch(
         m["chunk_ordinal"] = int(global_start + i)
         m = _sanitize_metadata(m)
         vectors.append((cid, emb, m))
-    idx.upsert(vectors=vectors, namespace=namespace, show_progress=False)
+    try:
+        idx.upsert(vectors=vectors, namespace=namespace, show_progress=False)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "dimension" in msg and ("does not match" in msg or "mismatch" in msg):
+            index_name = pinecone_index_name_for_provider(provider)
+            emb_d, idx_d = _parse_pinecone_dimension_mismatch(exc)
+            if emb_d and idx_d:
+                hint = (
+                    f"Pinecone index {index_name!r} was created with dimension {idx_d}, but your "
+                    f"embeddings are dimension {emb_d}. The index name in Pinecone does not control "
+                    f"its size—in the Pinecone console, delete this index and create a new one with "
+                    f"dimension {emb_d} (metric cosine), then keep PINECONE_INDEX_GOOGLE={index_name!r} "
+                    f"in .env or point it at the new index name."
+                )
+            elif provider == "google":
+                hint = (
+                    f"Pinecone index {index_name!r} does not match Google embedding size "
+                    f"(gemini-embedding-001 uses 3072). Recreate the index at 3072 dimensions or fix "
+                    f"PINECONE_INDEX_GOOGLE in .env (see .env.example)."
+                )
+            else:
+                hint = (
+                    f"Pinecone index {index_name!r} does not match your Ollama embed model dimensions "
+                    f"(e.g. nomic-embed-text uses 768). Recreate a matching index and set "
+                    f"PINECONE_INDEX_OLLAMA (or PINECONE_INDEX) in .env."
+                )
+            raise RuntimeError(hint) from exc
+        raise
 
 
 def delete_namespace(provider: Provider, namespace: str) -> None:
@@ -92,6 +133,28 @@ def delete_namespace(provider: Provider, namespace: str) -> None:
     except NotFoundException:
         # Index missing (renamed, deleted, or wrong PINECONE_INDEX_* env); vectors are already gone.
         return
+
+
+def create_serverless_pinecone_index(
+    name: str,
+    dimension: int,
+    *,
+    metric: str = "cosine",
+    cloud: str = "aws",
+    region: str = "us-east-1",
+) -> dict[str, Any]:
+    """Create a serverless dense index via the Pinecone control API."""
+    if not PINECONE_API_KEY:
+        raise RuntimeError("PINECONE_API_KEY is not set.")
+    pc = _pc()
+    spec = ServerlessSpec(cloud=cloud, region=region)
+    model = pc.create_index(
+        name=name,
+        spec=spec,
+        dimension=dimension,
+        metric=metric,
+    )
+    return model.to_dict()
 
 
 def namespace_has_vectors(provider: Provider, namespace: str) -> bool:

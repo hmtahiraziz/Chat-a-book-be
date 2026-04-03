@@ -41,6 +41,10 @@ PINECONE_INDEX = os.getenv("PINECONE_INDEX", "").strip()
 PINECONE_INDEX_OLLAMA = os.getenv("PINECONE_INDEX_OLLAMA", "").strip()
 PINECONE_INDEX_GOOGLE = os.getenv("PINECONE_INDEX_GOOGLE", "").strip()
 
+# Defaults for POST /admin/pinecone/index (serverless index creation).
+PINECONE_SERVERLESS_CLOUD = os.getenv("PINECONE_SERVERLESS_CLOUD", "aws").strip()
+PINECONE_SERVERLESS_REGION = os.getenv("PINECONE_SERVERLESS_REGION", "us-east-1").strip()
+
 
 def use_pinecone_vector_store() -> bool:
     if _VECTOR_STORE_RAW == "pinecone":
@@ -77,5 +81,17 @@ def public_vector_store_info() -> dict[str, Any]:
             "default": PINECONE_INDEX or None,
             "ollama": PINECONE_INDEX_OLLAMA or None,
             "google": PINECONE_INDEX_GOOGLE or None,
+        }
+        # Typical embedding output sizes (index dimension must match exactly).
+        payload["pinecone_embedding_dimensions"] = {
+            "google": 3072,
+            "ollama": 768,
+            "note": "Ollama size depends on OLLAMA_EMBED_MODEL; 768 is for nomic-embed-text.",
+        }
+    if PINECONE_API_KEY:
+        payload["pinecone_create_index_route"] = "POST /admin/pinecone/index"
+        payload["pinecone_create_index_defaults"] = {
+            "cloud": PINECONE_SERVERLESS_CLOUD,
+            "region": PINECONE_SERVERLESS_REGION,
         }
     return payload
