@@ -120,12 +120,31 @@ Rules:
 - Be concise unless the user asks for detail."""
 
 
+def format_strict_rules_block(global_rules: str, chat_rules: str) -> str:
+    """Extra instructions the model must follow (server env + client thread)."""
+    g = (global_rules or "").strip()
+    c = (chat_rules or "").strip()
+    blocks: list[str] = []
+    if g:
+        blocks.append("### Global rules (set on the server — obey strictly)\n" + g)
+    if c:
+        blocks.append("### Thread chat rules (obey strictly)\n" + c)
+    if not blocks:
+        return ""
+    return "\n\n".join(blocks) + "\n\n"
+
+
 def build_full_rag_prompt(
     question: str,
     context: str,
     history_block: str | None,
+    global_rules: str = "",
+    chat_rules: str = "",
 ) -> str:
+    extra = format_strict_rules_block(global_rules, chat_rules)
     parts: list[str] = [RAG_SYSTEM_RULES, ""]
+    if extra:
+        parts.append(extra)
     if history_block:
         parts.append("Prior conversation (for context only; excerpts are the source of truth):")
         parts.append(history_block)

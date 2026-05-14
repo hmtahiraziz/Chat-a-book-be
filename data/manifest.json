@@ -22,5 +22,17 @@
     ],
     "indexed_at": 1775152695,
     "embedding_provider": "google"
+  },
+  "hrt-portal-srs-google": {
+    "book_id": "hrt-portal-srs-google",
+    "filename": "HRT Portal SRS.pdf",
+    "pdf_path": "/Users/macbookpro/Desktop/RAG/Book-Rag/ai-book-chatbot-v2/data/books/hrt-portal-srs.pdf",
+    "pages": 19,
+    "chunks": 24,
+    "chapters": [
+      "Unknown"
+    ],
+    "indexed_at": 1775237933,
+    "embedding_provider": "google"
   }
 }
