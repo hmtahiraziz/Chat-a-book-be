@@ -45,6 +45,9 @@ PINECONE_INDEX_GOOGLE = os.getenv("PINECONE_INDEX_GOOGLE", "").strip()
 PINECONE_SERVERLESS_CLOUD = os.getenv("PINECONE_SERVERLESS_CLOUD", "aws").strip()
 PINECONE_SERVERLESS_REGION = os.getenv("PINECONE_SERVERLESS_REGION", "us-east-1").strip()
 
+# Optional. Injected into every /chat LLM call (RAG + book/chapter summaries). Multiline: use real newlines or \n in .env.
+CHAT_GLOBAL_RULES = os.getenv("CHAT_GLOBAL_RULES", "").strip()
+
 
 def use_pinecone_vector_store() -> bool:
     if _VECTOR_STORE_RAW == "pinecone":
@@ -94,4 +97,5 @@ def public_vector_store_info() -> dict[str, Any]:
             "cloud": PINECONE_SERVERLESS_CLOUD,
             "region": PINECONE_SERVERLESS_REGION,
         }
+    payload["chat_global_rules_configured"] = bool(CHAT_GLOBAL_RULES)
     return payload
