@@ -3,7 +3,7 @@ import re
 from langchain_core.vectorstores import VectorStore
 
 from app.services.provider_service import Provider, get_chat_model
-from app.services.rag_chat_service import dedupe_docs, format_context_blocks
+from app.services.rag_chat_service import dedupe_docs, format_context_blocks, format_strict_rules_block
 from app.services.vector_service import retrieve_from_store
 
 
@@ -11,7 +11,13 @@ def _llm(chat_provider: Provider):
     return get_chat_model(chat_provider, temperature=0.2)
 
 
-def summarize_book(store: VectorStore, max_docs: int = 30, chat_provider: Provider = "ollama") -> str:
+def summarize_book(
+    store: VectorStore,
+    max_docs: int = 30,
+    chat_provider: Provider = "ollama",
+    global_rules: str = "",
+    chat_rules: str = "",
+) -> str:
     half = max(12, max_docs // 2)
     docs_a = retrieve_from_store(
         store,
@@ -33,8 +39,10 @@ def summarize_book(store: VectorStore, max_docs: int = 30, chat_provider: Provid
         docs = dedupe_docs(docs + docs_c)
     docs = docs[:max_docs]
     context = format_context_blocks(docs)
+    rules = format_strict_rules_block(global_rules, chat_rules)
     prompt = (
-        "Summarize this book using only the excerpts below. If something is missing, omit it rather than inventing.\n"
+        (rules if rules else "")
+        + "Summarize this book using only the excerpts below. If something is missing, omit it rather than inventing.\n"
         "Structure your answer with:\n"
         "1) Main plot\n2) Key characters\n3) Major themes\n4) Ending / resolution overview\n\n"
         f"Excerpts:\n{context}"
@@ -43,7 +51,12 @@ def summarize_book(store: VectorStore, max_docs: int = 30, chat_provider: Provid
 
 
 def summarize_chapter(
-    store: VectorStore, chapter: str, max_docs: int = 18, chat_provider: Provider = "ollama"
+    store: VectorStore,
+    chapter: str,
+    max_docs: int = 18,
+    chat_provider: Provider = "ollama",
+    global_rules: str = "",
+    chat_rules: str = "",
 ) -> str:
     chapter_norm = chapter.strip().lower()
     chapter_docs = []
@@ -76,8 +89,10 @@ def summarize_chapter(
         return "Chapter summary not found in indexed content."
 
     context = format_context_blocks(chapter_docs)
+    rules = format_strict_rules_block(global_rules, chat_rules)
     prompt = (
-        f"Summarize {chapter} of this book using only the excerpts below. "
+        (rules if rules else "")
+        + f"Summarize {chapter} of this book using only the excerpts below. "
         "Stay accurate; do not invent scenes or characters not supported by the text.\n\n"
         f"Excerpts:\n{context}"
     )
