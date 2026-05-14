@@ -15,6 +15,7 @@ from langchain_community.vectorstores import FAISS
 from app.config import (
     ADMIN_API_TOKEN,
     BOOKS_DIR,
+    CHAT_GLOBAL_RULES,
     PINECONE_API_KEY,
     PINECONE_SERVERLESS_CLOUD,
     PINECONE_SERVERLESS_REGION,
@@ -796,7 +797,12 @@ def chat(body: ChatRequest) -> dict[str, Any]:
         store = load_book_store(body.book_id, embedding_provider=body.embedding_provider)
 
         if intent == "book_summary":
-            answer = summarize_book(store, chat_provider=body.chat_provider)
+            answer = summarize_book(
+                store,
+                chat_provider=body.chat_provider,
+                global_rules=CHAT_GLOBAL_RULES,
+                chat_rules=body.chat_rules,
+            )
             sources = []
         elif intent == "chapter_summary":
             chapter_match = re.search(
@@ -805,7 +811,13 @@ def chat(body: ChatRequest) -> dict[str, Any]:
             if chapter_match:
                 raw = chapter_match.group(1)
                 chapter_name = f"Chapter {raw.upper() if raw.isalpha() else raw}"
-                answer = summarize_chapter(store, chapter_name, chat_provider=body.chat_provider)
+                answer = summarize_chapter(
+                    store,
+                    chapter_name,
+                    chat_provider=body.chat_provider,
+                    global_rules=CHAT_GLOBAL_RULES,
+                    chat_rules=body.chat_rules,
+                )
                 sources = []
             else:
                 answer = "Please specify the chapter number/name in your question."
@@ -816,7 +828,13 @@ def chat(body: ChatRequest) -> dict[str, Any]:
             docs = gather_documents_for_rag(store, intent, body.question, body.k)
             context = format_context_blocks(docs)
             llm = get_chat_model(body.chat_provider, temperature=0.1)
-            prompt = build_full_rag_prompt(body.question, context, history_block)
+            prompt = build_full_rag_prompt(
+                body.question,
+                context,
+                history_block,
+                global_rules=CHAT_GLOBAL_RULES,
+                chat_rules=body.chat_rules,
+            )
             answer = llm.invoke(prompt).content.strip()
             sources = [
                 {

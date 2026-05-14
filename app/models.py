@@ -26,6 +26,11 @@ class ChatRequest(BaseModel):
     embedding_provider: Provider = "ollama"
     chat_provider: Provider = "ollama"
     history: list[ChatHistoryTurn] = Field(default_factory=list, max_length=24)
+    chat_rules: str = Field(
+        default="",
+        max_length=8_000,
+        description="Per-thread rules from the client; combined with server CHAT_GLOBAL_RULES.",
+    )
 
 
 class ClassifyRequest(BaseModel):
