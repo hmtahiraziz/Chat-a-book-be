@@ -11,7 +11,7 @@ def _llm(chat_provider: Provider):
     return get_chat_model(chat_provider, temperature=0.2)
 
 
-def summarize_book(store: VectorStore, max_docs: int = 30, chat_provider: Provider = "ollama") -> str:
+def summarize_book(store: VectorStore, max_docs: int = 30, chat_provider: Provider = "openai") -> str:
     half = max(12, max_docs // 2)
     docs_a = retrieve_from_store(
         store,
@@ -43,7 +43,7 @@ def summarize_book(store: VectorStore, max_docs: int = 30, chat_provider: Provid
 
 
 def summarize_chapter(
-    store: VectorStore, chapter: str, max_docs: int = 18, chat_provider: Provider = "ollama"
+    store: VectorStore, chapter: str, max_docs: int = 18, chat_provider: Provider = "openai"
 ) -> str:
     chapter_norm = chapter.strip().lower()
     chapter_docs = []

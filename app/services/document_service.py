@@ -10,9 +10,13 @@ from app.config import CHUNK_OVERLAP, CHUNK_SIZE
 _CHAPTER_PATTERN = re.compile(r"\bchapter\s+([0-9]+|[ivxlcdm]+)\b", re.IGNORECASE)
 
 
-def extract_pages(file_path: str) -> List[Tuple[int, str]]:
+def extract_pages(source: str | bytes) -> List[Tuple[int, str]]:
     pages: List[Tuple[int, str]] = []
-    with fitz.open(file_path) as doc:
+    if isinstance(source, bytes):
+        doc = fitz.open(stream=source, filetype="pdf")
+    else:
+        doc = fitz.open(source)
+    with doc:
         for i, page in enumerate(doc):
             text = page.get_text().strip()
             if text:

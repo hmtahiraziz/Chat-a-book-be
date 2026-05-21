@@ -1,31 +1,37 @@
 import asyncio
 import hashlib
-import json
 import random
 import re
 import time
-from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
-from langchain_community.vectorstores import FAISS
+from fastapi.responses import Response
 
 from app.config import (
     ADMIN_API_TOKEN,
-    BOOKS_DIR,
     PINECONE_API_KEY,
     PINECONE_SERVERLESS_CLOUD,
     PINECONE_SERVERLESS_REGION,
-    PROGRESS_DIR,
     public_vector_store_info,
-    use_pinecone_vector_store,
+    require_mongodb_config,
+    require_pinecone_config,
 )
 from app.models import ChatRequest, ClassifyRequest, CreatePineconeIndexRequest, TtsRequest
+from app.services.book_service import (
+    count_books_with_pdf_file_id,
+    delete_book as mongo_delete_book,
+    delete_pdf_file,
+    get_book,
+    list_books,
+    read_pdf_bytes,
+    store_pdf,
+    upsert_book,
+)
 from app.services.classifier_service import classify_query
 from app.services.document_service import chunk_pages, extract_pages
-from app.services.manifest_service import get_book, list_books, pop_book, upsert_book
+from app.services.progress_service import delete_progress, load_progress, save_progress
 from app.services.provider_service import Provider, get_chat_model, get_embedding_model
 from app.services.rag_chat_service import (
     build_full_rag_prompt,
@@ -34,10 +40,9 @@ from app.services.rag_chat_service import (
     gather_documents_for_rag,
 )
 from app.services.summary_service import summarize_book, summarize_chapter
-from app.services.tts_service import synthesize_gemini_tts_wav
+from app.services.tts_service import synthesize_openai_tts_wav
 from app.services.vector_service import (
     clear_book_index_vectors,
-    faiss_index_dir,
     index_exists,
     list_book_documents_page,
     load_book_store,
@@ -61,6 +66,15 @@ ingest_status: dict[str, dict[str, Any]] = {}
 ingest_control: dict[str, dict[str, bool]] = {}
 
 
+@app.on_event("startup")
+def _validate_required_services() -> None:
+    try:
+        require_mongodb_config()
+        require_pinecone_config()
+    except RuntimeError as exc:
+        raise RuntimeError(f"Startup configuration error: {exc}") from exc
+
+
 def verify_admin(x_admin_token: Annotated[str | None, Header()] = None) -> None:
     if not ADMIN_API_TOKEN:
         return
@@ -72,6 +86,8 @@ def verify_admin(x_admin_token: Annotated[str | None, Header()] = None) -> None:
 
 
 def _sanitize_filename(name: str) -> str:
+    from pathlib import Path
+
     base = Path(name).name
     cleaned = _SAFE_NAME.sub("_", base) or "upload.pdf"
     if not cleaned.lower().endswith(".pdf"):
@@ -80,13 +96,16 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _book_id_from_filename(filename: str) -> str:
+    from pathlib import Path
+
     stem = Path(filename).stem.lower()
     safe = re.sub(r"[^a-z0-9]+", "-", stem).strip("-")
     return safe or f"book-{int(time.time())}"
 
 
-def _manifest_filename_and_safe_name(display_name: str | None, upload_filename: str) -> tuple[str, str]:
-    """(library label + download hint, ingest_status key / on-disk PDF basename)."""
+def _display_filename_and_safe_name(display_name: str | None, upload_filename: str) -> tuple[str, str]:
+    from pathlib import Path
+
     if display_name and display_name.strip():
         label = Path(display_name.strip()).name.strip()
         if label:
@@ -95,23 +114,9 @@ def _manifest_filename_and_safe_name(display_name: str | None, upload_filename: 
                     status_code=400,
                     detail="display_name is too long (max 240 characters).",
                 )
-            manifest = label if label.lower().endswith(".pdf") else f"{label}.pdf"
-            return manifest, _sanitize_filename(manifest)
+            library_name = label if label.lower().endswith(".pdf") else f"{label}.pdf"
+            return library_name, _sanitize_filename(library_name)
     return upload_filename, _sanitize_filename(upload_filename)
-
-
-def _load_progress(progress_file: Path) -> dict[str, Any]:
-    if not progress_file.exists():
-        return {}
-    try:
-        return json.loads(progress_file.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_progress(progress_file: Path, payload: dict[str, Any]) -> None:
-    progress_file.parent.mkdir(parents=True, exist_ok=True)
-    progress_file.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _build_doc_signature(
@@ -141,7 +146,7 @@ def root() -> dict[str, str]:
 
 @app.get("/server/info")
 def server_info() -> dict[str, Any]:
-    """Public server metadata for the UI (vector DB mode, Pinecone index names). No secrets."""
+    """Public server metadata for the UI (Pinecone, MongoDB). No secrets."""
     return public_vector_store_info()
 
 
@@ -150,7 +155,6 @@ def admin_create_pinecone_index(
     body: CreatePineconeIndexRequest,
     _admin: None = Depends(verify_admin),
 ) -> dict[str, Any]:
-    """Create a serverless Pinecone index (control plane). Requires PINECONE_API_KEY and optional X-Admin-Token."""
     if not PINECONE_API_KEY:
         raise HTTPException(
             status_code=503,
@@ -219,17 +223,43 @@ def control_ingest(filename: str, action: str) -> dict[str, Any]:
     return {"filename": safe_name, "action": action, "control": control}
 
 
+def _upsert_book_record(
+    *,
+    book_id: str,
+    library_filename: str,
+    base_book_id: str,
+    pdf_file_id: str,
+    pages: int,
+    chunks: int,
+    chapters: list[str],
+    embedding_provider: Provider,
+) -> None:
+    upsert_book(
+        book_id,
+        {
+            "book_id": book_id,
+            "filename": library_filename,
+            "base_book_id": base_book_id,
+            "pdf_file_id": pdf_file_id,
+            "pages": pages,
+            "chunks": chunks,
+            "chapters": chapters,
+            "indexed_at": int(time.time()),
+            "embedding_provider": embedding_provider,
+        },
+    )
+
+
 @app.post("/books/ingest")
 async def ingest_book(
     file: UploadFile = File(...),
     display_name: str | None = Form(None),
-    embedding_provider: Provider = "ollama",
+    embedding_provider: Provider = "openai",
     max_pages: int | None = None,
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
     batch_size: int | None = None,
     requests_per_second: float | None = None,
-    persist_every_batches: int = 20,
     max_retries: int = 3,
 ) -> dict[str, Any]:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -238,12 +268,9 @@ async def ingest_book(
         raise HTTPException(status_code=400, detail="max_pages must be > 0")
     if batch_size is not None and batch_size <= 0:
         raise HTTPException(status_code=400, detail="batch_size must be > 0")
-    if persist_every_batches <= 0:
-        raise HTTPException(status_code=400, detail="persist_every_batches must be > 0")
     if max_retries < 0:
         raise HTTPException(status_code=400, detail="max_retries must be >= 0")
 
-    # Same defaults as V1 ingest when query params are omitted (no UI tuning).
     if batch_size is None:
         batch_size = 12
     if requests_per_second is None:
@@ -251,37 +278,31 @@ async def ingest_book(
     if requests_per_second < 0:
         raise HTTPException(status_code=400, detail="requests_per_second must be >= 0")
 
-    manifest_filename, safe_name = _manifest_filename_and_safe_name(display_name, file.filename)
+    library_filename, safe_name = _display_filename_and_safe_name(display_name, file.filename)
     base_book_id = _book_id_from_filename(safe_name)
     book_id = f"{base_book_id}-{embedding_provider}"
-    BOOKS_DIR.mkdir(parents=True, exist_ok=True)
-    PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
-    path = BOOKS_DIR / f"{base_book_id}.pdf"
-    progress_file = PROGRESS_DIR / f"{book_id}.progress.json"
-    index_dir = faiss_index_dir(book_id, embedding_provider)
 
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
-    path.write_bytes(content)
 
-    pages = extract_pages(str(path))
+    pdf_file_id = await asyncio.to_thread(store_pdf, base_book_id, content)
+
+    pages = extract_pages(content)
     if not pages:
         raise HTTPException(status_code=400, detail="No extractable text found in PDF.")
     if max_pages is not None:
         pages = pages[:max_pages]
 
-    cs = chunk_size
-    co = chunk_overlap
-    docs = chunk_pages(book_id, pages, chunk_size=cs, chunk_overlap=co)
+    docs = chunk_pages(book_id, pages, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     if not docs:
         raise HTTPException(status_code=400, detail="No extractable text found in PDF.")
 
     from app.config import CHUNK_OVERLAP as DEFAULT_CO
     from app.config import CHUNK_SIZE as DEFAULT_CS
 
-    effective_cs = cs if cs is not None else DEFAULT_CS
-    effective_co = co if co is not None else DEFAULT_CO
+    effective_cs = chunk_size if chunk_size is not None else DEFAULT_CS
+    effective_co = chunk_overlap if chunk_overlap is not None else DEFAULT_CO
 
     doc_signature = _build_doc_signature(
         content=content,
@@ -292,7 +313,7 @@ async def ingest_book(
         book_id=book_id,
     )
 
-    progress = _load_progress(progress_file)
+    progress = load_progress(book_id)
     valid_progress = (
         progress.get("doc_signature") == doc_signature
         and progress.get("total_chunks") == len(docs)
@@ -311,7 +332,6 @@ async def ingest_book(
     embedder = get_embedding_model(embedding_provider)
     throttle_delay = (1.0 / requests_per_second) if requests_per_second > 0 else 0.0
     started_at = time.time()
-    batches_since_persist = 0
 
     ingest_status[safe_name] = {
         "filename": safe_name,
@@ -327,17 +347,6 @@ async def ingest_book(
         "message": f"Preparing embeddings ({embedding_provider})",
     }
     ingest_control[safe_name] = {"paused": False, "stop": False}
-
-    store: FAISS | None = None
-    if next_index > 0 and not use_pinecone_vector_store():
-        try:
-            store = await asyncio.to_thread(load_book_store, book_id, embedding_provider)
-        except Exception:
-            next_index = 0
-            clear_book_index_vectors(book_id, embedding_provider)
-            ingest_status[safe_name]["resumed"] = False
-            ingest_status[safe_name]["processed_chunks"] = 0
-            ingest_status[safe_name]["progress_percent"] = 0.0
 
     chapters = sorted({str(d.metadata.get("chapter", "Unknown")) for d in docs})
 
@@ -357,18 +366,15 @@ async def ingest_book(
                 "message": "Already indexed (same file); skipped.",
             }
         )
-        upsert_book(
-            book_id,
-            {
-                "book_id": book_id,
-                "filename": manifest_filename,
-                "pdf_path": str(path),
-                "pages": len(pages),
-                "chunks": len(docs),
-                "chapters": chapters,
-                "indexed_at": int(time.time()),
-                "embedding_provider": embedding_provider,
-            },
+        _upsert_book_record(
+            book_id=book_id,
+            library_filename=library_filename,
+            base_book_id=base_book_id,
+            pdf_file_id=pdf_file_id,
+            pages=len(pages),
+            chunks=len(docs),
+            chapters=chapters,
+            embedding_provider=embedding_provider,
         )
         return {
             "filename": safe_name,
@@ -377,7 +383,6 @@ async def ingest_book(
             "chunks_indexed": len(docs),
             "total_chunks_for_run": len(docs),
             "embedding_provider": embedding_provider,
-            "progress_file": str(progress_file),
             "status": "completed",
         }
 
@@ -395,19 +400,16 @@ async def ingest_book(
                         "message": "Indexing stopped by user",
                     }
                 )
-                _save_progress(
-                    progress_file,
+                save_progress(
+                    book_id,
                     {
                         "doc_signature": doc_signature,
-                        "book_id": book_id,
                         "total_chunks": len(docs),
                         "next_index": start_idx,
                         "embedding_provider": embedding_provider,
                         "completed": False,
                     },
                 )
-                if store is not None and not use_pinecone_vector_store():
-                    await asyncio.to_thread(store.save_local, str(index_dir))
                 break
 
             while control.get("paused") and not control.get("stop"):
@@ -434,19 +436,16 @@ async def ingest_book(
                         "message": "Indexing stopped by user",
                     }
                 )
-                _save_progress(
-                    progress_file,
+                save_progress(
+                    book_id,
                     {
                         "doc_signature": doc_signature,
-                        "book_id": book_id,
                         "total_chunks": len(docs),
                         "next_index": start_idx,
                         "embedding_provider": embedding_provider,
                         "completed": False,
                     },
                 )
-                if store is not None and not use_pinecone_vector_store():
-                    await asyncio.to_thread(store.save_local, str(index_dir))
                 break
 
             end_idx = min(start_idx + batch_size, len(docs))
@@ -473,7 +472,12 @@ async def ingest_book(
                     break
                 except Exception as exc:
                     message = str(exc)
-                    is_rate_limited = "429" in message or "RESOURCE_EXHAUSTED" in message
+                    is_rate_limited = (
+                        "429" in message
+                        or "RESOURCE_EXHAUSTED" in message
+                        or "rate_limit" in message.lower()
+                        or "rate limit" in message.lower()
+                    )
                     is_transient = (
                         "timed out" in message.lower()
                         or "timeout" in message.lower()
@@ -506,48 +510,30 @@ async def ingest_book(
                     await asyncio.sleep(retry_after)
                     retries += 1
 
-            if use_pinecone_vector_store():
-                from app.services.pinecone_store import pinecone_namespace, upsert_embedding_batch
+            from app.services.pinecone_store import pinecone_namespace, upsert_embedding_batch
 
-                ns = pinecone_namespace(book_id, embedding_provider)
-                await asyncio.to_thread(
-                    upsert_embedding_batch,
-                    embedding_provider,
-                    ns,
-                    start_idx,
-                    texts,
-                    embeddings,
-                    metadatas,
-                )
-            else:
-                pairs = list(zip(texts, embeddings))
-                if store is None:
-                    store = FAISS.from_embeddings(
-                        pairs,
-                        embedder,
-                        metadatas=metadatas,
-                    )
-                else:
-                    store.add_embeddings(pairs, metadatas=metadatas)
+            ns = pinecone_namespace(book_id, embedding_provider)
+            await asyncio.to_thread(
+                upsert_embedding_batch,
+                embedding_provider,
+                ns,
+                start_idx,
+                texts,
+                embeddings,
+                metadatas,
+            )
 
             next_index = end_idx
-
-            _save_progress(
-                progress_file,
+            save_progress(
+                book_id,
                 {
                     "doc_signature": doc_signature,
-                    "book_id": book_id,
                     "total_chunks": len(docs),
                     "next_index": next_index,
                     "embedding_provider": embedding_provider,
                     "completed": next_index >= len(docs),
                 },
             )
-            if not use_pinecone_vector_store():
-                batches_since_persist += 1
-                if store is not None and batches_since_persist >= persist_every_batches:
-                    await asyncio.to_thread(store.save_local, str(index_dir))
-                    batches_since_persist = 0
 
             if next_index < len(docs) and throttle_delay > 0:
                 await asyncio.sleep(throttle_delay)
@@ -571,8 +557,6 @@ async def ingest_book(
         ) from exc
 
     if ingest_status[safe_name].get("status") not in _TERMINAL_INGEST_STATUSES:
-        if store is not None and not use_pinecone_vector_store():
-            await asyncio.to_thread(store.save_local, str(index_dir))
         elapsed = round(max(0.0, time.time() - started_at), 1)
         ingest_status[safe_name].update(
             {
@@ -584,29 +568,25 @@ async def ingest_book(
                 "message": "Ingestion completed",
             }
         )
-        _save_progress(
-            progress_file,
+        save_progress(
+            book_id,
             {
                 "doc_signature": doc_signature,
-                "book_id": book_id,
                 "total_chunks": len(docs),
                 "next_index": next_index,
                 "embedding_provider": embedding_provider,
                 "completed": True,
             },
         )
-        upsert_book(
-            book_id,
-            {
-                "book_id": book_id,
-                "filename": manifest_filename,
-                "pdf_path": str(path),
-                "pages": len(pages),
-                "chunks": len(docs),
-                "chapters": chapters,
-                "indexed_at": int(time.time()),
-                "embedding_provider": embedding_provider,
-            },
+        _upsert_book_record(
+            book_id=book_id,
+            library_filename=library_filename,
+            base_book_id=base_book_id,
+            pdf_file_id=pdf_file_id,
+            pages=len(pages),
+            chunks=len(docs),
+            chapters=chapters,
+            embedding_provider=embedding_provider,
         )
 
     final = ingest_status[safe_name]
@@ -617,7 +597,6 @@ async def ingest_book(
         "chunks_indexed": final.get("processed_chunks", next_index),
         "total_chunks_for_run": len(docs),
         "embedding_provider": embedding_provider,
-        "progress_file": str(progress_file),
         "status": final.get("status"),
     }
 
@@ -633,19 +612,10 @@ def delete_book(book_id: str) -> dict[str, Any]:
     if not entry:
         raise HTTPException(status_code=404, detail="Book not found in library.")
 
-    embedding_provider: Provider = entry.get("embedding_provider") or "ollama"
-    pdf_path_raw = entry.get("pdf_path")
+    embedding_provider: Provider = entry.get("embedding_provider") or "openai"
     filename_for_ingest = entry.get("filename") or ""
     safe_name = _sanitize_filename(str(filename_for_ingest) or "upload.pdf")
-
-    other_books_share_pdf = False
-    if pdf_path_raw:
-        for bid, other in list_books().items():
-            if bid == book_id:
-                continue
-            if other.get("pdf_path") == pdf_path_raw:
-                other_books_share_pdf = True
-                break
+    pdf_file_id = entry.get("pdf_file_id")
 
     st = ingest_status.get(safe_name)
     if (
@@ -657,21 +627,13 @@ def delete_book(book_id: str) -> dict[str, Any]:
         control["stop"] = True
         control["paused"] = False
 
-    pop_book(book_id)
+    mongo_delete_book(book_id)
     clear_book_index_vectors(book_id, embedding_provider)
-
-    progress_file = PROGRESS_DIR / f"{book_id}.progress.json"
-    removed_progress = False
-    if progress_file.exists():
-        progress_file.unlink()
-        removed_progress = True
+    removed_progress = delete_progress(book_id)
 
     removed_pdf = False
-    if pdf_path_raw and not other_books_share_pdf:
-        path = Path(str(pdf_path_raw))
-        if path.is_file():
-            path.unlink()
-            removed_pdf = True
+    if pdf_file_id and count_books_with_pdf_file_id(pdf_file_id) == 0:
+        removed_pdf = delete_pdf_file(str(pdf_file_id))
         ingest_status.pop(safe_name, None)
         ingest_control.pop(safe_name, None)
 
@@ -686,7 +648,7 @@ def delete_book(book_id: str) -> dict[str, Any]:
 @app.get("/admin/books/{book_id}/chunks")
 def admin_list_book_chunks(
     book_id: str,
-    embedding_provider: Provider = "ollama",
+    embedding_provider: Provider = "openai",
     offset: int = 0,
     limit: int = 50,
     _admin: None = Depends(verify_admin),
@@ -716,30 +678,30 @@ def admin_list_book_chunks(
 
 
 @app.get("/books/{book_id}/pdf")
-def get_book_pdf(book_id: str) -> FileResponse:
+def get_book_pdf(book_id: str) -> Response:
     entry = get_book(book_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Book not found in library.")
-    raw_path = entry.get("pdf_path")
-    if not raw_path:
-        raise HTTPException(status_code=404, detail="No PDF path recorded for this book.")
-    path = Path(str(raw_path))
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="PDF file is missing on disk.")
-    download_name = str(entry.get("filename") or path.name)
-    return FileResponse(
-        path,
+    pdf_file_id = entry.get("pdf_file_id")
+    if not pdf_file_id:
+        raise HTTPException(status_code=404, detail="No PDF stored for this book.")
+    content = read_pdf_bytes(str(pdf_file_id))
+    if not content:
+        raise HTTPException(status_code=404, detail="PDF file is missing in storage.")
+    download_name = str(entry.get("filename") or f"{book_id}.pdf")
+    return Response(
+        content=content,
         media_type="application/pdf",
-        filename=download_name,
-        content_disposition_type="inline",
+        headers={
+            "Content-Disposition": f'inline; filename="{download_name}"',
+        },
     )
 
 
 @app.post("/tts")
 def text_to_speech(body: TtsRequest) -> Response:
-    """Gemini native TTS; returns WAV for HTMLAudioElement playback."""
     try:
-        wav = synthesize_gemini_tts_wav(body.text, voice_name=body.voice)
+        wav = synthesize_openai_tts_wav(body.text, voice_name=body.voice)
         return Response(content=wav, media_type="audio/wav")
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -758,7 +720,7 @@ def classify(body: ClassifyRequest) -> dict[str, str]:
 
 @app.get("/books/{book_id}/summary")
 def get_book_summary(
-    book_id: str, embedding_provider: Provider = "ollama", chat_provider: Provider = "ollama"
+    book_id: str, embedding_provider: Provider = "openai", chat_provider: Provider = "openai"
 ) -> dict[str, str]:
     try:
         store = load_book_store(book_id, embedding_provider=embedding_provider)
@@ -773,8 +735,8 @@ def get_book_summary(
 def get_chapter_summary(
     book_id: str,
     chapter: str,
-    embedding_provider: Provider = "ollama",
-    chat_provider: Provider = "ollama",
+    embedding_provider: Provider = "openai",
+    chat_provider: Provider = "openai",
 ) -> dict[str, str]:
     try:
         store = load_book_store(book_id, embedding_provider=embedding_provider)

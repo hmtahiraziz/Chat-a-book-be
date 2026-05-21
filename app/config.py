@@ -7,20 +7,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
-BOOKS_DIR = DATA_DIR / "books"
-INDEX_DIR = DATA_DIR / "indices"
-PROGRESS_DIR = DATA_DIR / "progress"
-MANIFEST_FILE = DATA_DIR / "manifest.json"
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "llama3.2")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
-GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
-GEMINI_TTS_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
-GEMINI_TTS_VOICE = os.getenv("GEMINI_TTS_VOICE", "charon")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-large")
+OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1")
+OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "900"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
@@ -32,62 +24,63 @@ RAG_MMR_LAMBDA = float(os.getenv("RAG_MMR_LAMBDA", "0.55"))
 # If set, admin routes require header: X-Admin-Token: <value>
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "").strip()
 
-# Vector store: "faiss" (local disk) or "pinecone" (hosted).
-# If VECTOR_STORE is unset: use Pinecone when PINECONE_API_KEY and PINECONE_INDEX are set, else FAISS.
-_VECTOR_STORE_RAW = os.getenv("VECTOR_STORE", "").strip().lower()
+# MongoDB — book library metadata and PDFs (GridFS)
+MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "bookchat").strip()
+MONGODB_BOOKS_COLLECTION = os.getenv("MONGODB_BOOKS_COLLECTION", "books").strip()
+MONGODB_PDF_BUCKET = os.getenv("MONGODB_PDF_BUCKET", "pdfs").strip()
+MONGODB_INGEST_PROGRESS_COLLECTION = os.getenv(
+    "MONGODB_INGEST_PROGRESS_COLLECTION", "ingest_progress"
+).strip()
 
+# Pinecone — required vector store for embeddings
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "").strip()
 PINECONE_INDEX = os.getenv("PINECONE_INDEX", "").strip()
-PINECONE_INDEX_OLLAMA = os.getenv("PINECONE_INDEX_OLLAMA", "").strip()
-PINECONE_INDEX_GOOGLE = os.getenv("PINECONE_INDEX_GOOGLE", "").strip()
+PINECONE_INDEX_OPENAI = os.getenv("PINECONE_INDEX_OPENAI", "").strip()
 
-# Defaults for POST /admin/pinecone/index (serverless index creation).
 PINECONE_SERVERLESS_CLOUD = os.getenv("PINECONE_SERVERLESS_CLOUD", "aws").strip()
 PINECONE_SERVERLESS_REGION = os.getenv("PINECONE_SERVERLESS_REGION", "us-east-1").strip()
 
 
-def use_pinecone_vector_store() -> bool:
-    if _VECTOR_STORE_RAW == "pinecone":
-        return True
-    if _VECTOR_STORE_RAW == "faiss":
-        return False
-    return bool(PINECONE_API_KEY and PINECONE_INDEX)
+def require_pinecone_config() -> None:
+    if not PINECONE_API_KEY:
+        raise RuntimeError("PINECONE_API_KEY is not set.")
+    if not PINECONE_INDEX and not PINECONE_INDEX_OPENAI:
+        raise RuntimeError(
+            "Set PINECONE_INDEX (or PINECONE_INDEX_OPENAI) in .env."
+        )
+
+
+def require_mongodb_config() -> None:
+    if not MONGODB_URI:
+        raise RuntimeError("MONGODB_URI is not set.")
 
 
 def pinecone_index_name_for_provider(provider: str) -> str:
-    """Separate Pinecone indexes per embedding provider if dimensions differ (768 vs 3072)."""
-    if provider == "google" and PINECONE_INDEX_GOOGLE:
-        return PINECONE_INDEX_GOOGLE
-    if provider == "ollama" and PINECONE_INDEX_OLLAMA:
-        return PINECONE_INDEX_OLLAMA
-    return PINECONE_INDEX
+    """Pinecone index for OpenAI embeddings (3072-dim text-embedding-3-large)."""
+    if PINECONE_INDEX_OPENAI:
+        return PINECONE_INDEX_OPENAI
+    if PINECONE_INDEX:
+        return PINECONE_INDEX
+    raise RuntimeError("No Pinecone index configured. Set PINECONE_INDEX_OPENAI or PINECONE_INDEX in .env.")
 
 
 def public_vector_store_info() -> dict[str, Any]:
     """Safe to expose to the UI: no API keys."""
-    resolved = "pinecone" if use_pinecone_vector_store() else "faiss"
-    env_mode = _VECTOR_STORE_RAW or "auto"
     payload: dict[str, Any] = {
-        "vector_store": resolved,
-        "vector_store_env": env_mode,
-        "vector_store_label": (
-            "Pinecone (hosted)"
-            if resolved == "pinecone"
-            else "FAISS (local files on the API server)"
-        ),
-    }
-    if resolved == "pinecone":
-        payload["pinecone_indexes"] = {
+        "vector_store": "pinecone",
+        "vector_store_label": "Pinecone (hosted)",
+        "library_store": "mongodb",
+        "library_store_label": "MongoDB (metadata + PDFs)",
+        "pinecone_indexes": {
             "default": PINECONE_INDEX or None,
-            "ollama": PINECONE_INDEX_OLLAMA or None,
-            "google": PINECONE_INDEX_GOOGLE or None,
-        }
-        # Typical embedding output sizes (index dimension must match exactly).
-        payload["pinecone_embedding_dimensions"] = {
-            "google": 3072,
-            "ollama": 768,
-            "note": "Ollama size depends on OLLAMA_EMBED_MODEL; 768 is for nomic-embed-text.",
-        }
+            "openai": PINECONE_INDEX_OPENAI or PINECONE_INDEX or None,
+        },
+        "pinecone_embedding_dimensions": {
+            "openai": 3072,
+            "note": "OpenAI size is for text-embedding-3-large default (3072).",
+        },
+    }
     if PINECONE_API_KEY:
         payload["pinecone_create_index_route"] = "POST /admin/pinecone/index"
         payload["pinecone_create_index_defaults"] = {

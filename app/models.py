@@ -2,7 +2,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-Provider = Literal["ollama", "google"]
+Provider = Literal["openai"]
 ChatRole = Literal["user", "assistant"]
 
 
@@ -23,14 +23,14 @@ class ChatRequest(BaseModel):
     book_id: str = Field(..., min_length=1)
     question: str = Field(..., min_length=1)
     k: int = Field(default=8, ge=1, le=20)
-    embedding_provider: Provider = "ollama"
-    chat_provider: Provider = "ollama"
+    embedding_provider: Provider = "openai"
+    chat_provider: Provider = "openai"
     history: list[ChatHistoryTurn] = Field(default_factory=list, max_length=24)
 
 
 class ClassifyRequest(BaseModel):
     question: str = Field(..., min_length=1)
-    chat_provider: Provider = "ollama"
+    chat_provider: Provider = "openai"
 
 
 class TtsRequest(BaseModel):
@@ -48,9 +48,9 @@ class CreatePineconeIndexRequest(BaseModel):
         le=20_000,
         description="Vector size; omit if using preset.",
     )
-    preset: Literal["google", "ollama"] | None = Field(
+    preset: Literal["openai"] | None = Field(
         default=None,
-        description="google -> 3072, ollama -> 768 (typical nomic-embed-text).",
+        description="openai -> 3072 (text-embedding-3-large).",
     )
     metric: Literal["cosine", "dotproduct", "euclidean"] = "cosine"
     cloud: str | None = Field(default=None, max_length=32)
@@ -64,16 +64,13 @@ class CreatePineconeIndexRequest(BaseModel):
     @model_validator(mode="after")
     def dimension_or_preset(self) -> Self:
         if self.dimension is None and self.preset is None:
-            raise ValueError("Provide either dimension or preset (google|ollama).")
+            raise ValueError("Provide either dimension or preset (openai).")
         if self.dimension is not None and self.preset is not None:
             raise ValueError("Provide only one of dimension or preset.")
         return self
 
     def effective_dimension(self) -> int:
-        if self.preset == "google":
+        if self.preset == "openai":
             return 3072
-        if self.preset == "ollama":
-            return 768
         assert self.dimension is not None
         return self.dimension
-

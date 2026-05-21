@@ -106,20 +106,19 @@ def upsert_embedding_batch(
                     f"Pinecone index {index_name!r} was created with dimension {idx_d}, but your "
                     f"embeddings are dimension {emb_d}. The index name in Pinecone does not control "
                     f"its size—in the Pinecone console, delete this index and create a new one with "
-                    f"dimension {emb_d} (metric cosine), then keep PINECONE_INDEX_GOOGLE={index_name!r} "
+                    f"dimension {emb_d} (metric cosine), then keep PINECONE_INDEX_OPENAI={index_name!r} "
                     f"in .env or point it at the new index name."
                 )
-            elif provider == "google":
+            elif provider == "openai":
                 hint = (
-                    f"Pinecone index {index_name!r} does not match Google embedding size "
-                    f"(gemini-embedding-001 uses 3072). Recreate the index at 3072 dimensions or fix "
-                    f"PINECONE_INDEX_GOOGLE in .env (see .env.example)."
+                    f"Pinecone index {index_name!r} does not match OpenAI embedding size "
+                    f"(text-embedding-3-large defaults to 3072). Recreate the index at 3072 dimensions or fix "
+                    f"PINECONE_INDEX_OPENAI in .env (see .env.example)."
                 )
             else:
                 hint = (
-                    f"Pinecone index {index_name!r} does not match your Ollama embed model dimensions "
-                    f"(e.g. nomic-embed-text uses 768). Recreate a matching index and set "
-                    f"PINECONE_INDEX_OLLAMA (or PINECONE_INDEX) in .env."
+                    f"Pinecone index {index_name!r} does not match embedding dimensions. "
+                    f"Recreate the index or fix PINECONE_INDEX / PINECONE_INDEX_OPENAI in .env."
                 )
             raise RuntimeError(hint) from exc
         raise
@@ -213,11 +212,11 @@ def fetch_documents_page(
     window = fetched[offset : offset + limit]
     chunks: list[dict[str, Any]] = []
     for rank, (ordinal, vid, doc) in enumerate(window):
-        faiss_like = ordinal if ordinal >= 0 else rank
+        chunk_index = ordinal if ordinal >= 0 else rank
         chunks.append(
             {
                 "ordinal": offset + rank + 1,
-                "faiss_index": faiss_like,
+                "chunk_index": chunk_index,
                 "doc_id": vid,
                 "text": doc.page_content,
                 "metadata": dict(doc.metadata),

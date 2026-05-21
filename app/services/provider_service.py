@@ -1,42 +1,33 @@
 from typing import Literal
 
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from app.config import (
-    GEMINI_API_KEY,
-    GEMINI_CHAT_MODEL,
-    OLLAMA_BASE_URL,
-    OLLAMA_CHAT_MODEL,
-    OLLAMA_EMBED_MODEL,
+    OPENAI_API_KEY,
+    OPENAI_CHAT_MODEL,
+    OPENAI_EMBED_MODEL,
 )
-from app.gemini_embedding_model import resolve_gemini_embedding_model
 
-Provider = Literal["ollama", "google"]
-
-
-def _validate_google_key() -> None:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not set. Add it to .env for google provider.")
+Provider = Literal["openai"]
 
 
-def get_embedding_model(provider: Provider):
-    if provider == "google":
-        _validate_google_key()
-        model = resolve_gemini_embedding_model()
-        return GoogleGenerativeAIEmbeddings(
-            model=model,
-            google_api_key=GEMINI_API_KEY,
-        )
-    return OllamaEmbeddings(model=OLLAMA_EMBED_MODEL, base_url=OLLAMA_BASE_URL)
+def _validate_openai_key() -> None:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set. Add it to .env.")
 
 
-def get_chat_model(provider: Provider, temperature: float = 0.1):
-    if provider == "google":
-        _validate_google_key()
-        return ChatGoogleGenerativeAI(
-            model=GEMINI_CHAT_MODEL,
-            google_api_key=GEMINI_API_KEY,
-            temperature=temperature,
-        )
-    return ChatOllama(model=OLLAMA_CHAT_MODEL, base_url=OLLAMA_BASE_URL, temperature=temperature)
+def get_embedding_model(provider: Provider = "openai"):
+    _validate_openai_key()
+    return OpenAIEmbeddings(
+        model=OPENAI_EMBED_MODEL,
+        api_key=OPENAI_API_KEY,
+    )
+
+
+def get_chat_model(provider: Provider = "openai", temperature: float = 0.1):
+    _validate_openai_key()
+    return ChatOpenAI(
+        model=OPENAI_CHAT_MODEL,
+        api_key=OPENAI_API_KEY,
+        temperature=temperature,
+    )
