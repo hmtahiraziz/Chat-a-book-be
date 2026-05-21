@@ -3,12 +3,12 @@ uvicorn
 python-multipart
 python-dotenv
 pymupdf
-faiss-cpu
+pymongo
 langchain
 langchain-text-splitters
 langchain-community
-langchain-ollama
-langchain-google-genai
+langchain-openai
+openai
 langchain-pinecone
 pinecone-client
 pydantic

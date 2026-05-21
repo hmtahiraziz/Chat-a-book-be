@@ -10,7 +10,7 @@ _CATEGORIES = [
 ]
 
 
-def classify_query(question: str, chat_provider: Provider = "ollama") -> str:
+def classify_query(question: str, chat_provider: Provider = "openai") -> str:
     llm = get_chat_model(chat_provider, temperature=0)
     prompt = (
         "Classify the user question into exactly one label from this list:\n"
