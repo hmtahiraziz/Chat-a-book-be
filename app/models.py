@@ -1,4 +1,4 @@
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -26,6 +26,26 @@ class ChatRequest(BaseModel):
     embedding_provider: Provider = "openai"
     chat_provider: Provider = "openai"
     history: list[ChatHistoryTurn] = Field(default_factory=list, max_length=24)
+
+
+class ChatMessagePayload(BaseModel):
+    id: str = Field(..., min_length=1)
+    role: ChatRole
+    content: str = Field(..., max_length=32_000)
+    classification: str | None = Field(default=None, max_length=256)
+    sources: list[dict[str, Any]] | None = None
+    createdAt: int = Field(default=0, ge=0)
+
+
+class ChatSessionPayload(BaseModel):
+    id: str | None = Field(default=None, max_length=128)
+    bookId: str = Field(..., min_length=1)
+    bookLabel: str = Field(default="", max_length=512)
+    embeddingProvider: Provider = "openai"
+    chatProvider: Provider = "openai"
+    title: str = Field(default="New chat", max_length=256)
+    messages: list[ChatMessagePayload] = Field(default_factory=list, max_length=200)
+    updatedAt: int = Field(default=0, ge=0)
 
 
 class ClassifyRequest(BaseModel):
