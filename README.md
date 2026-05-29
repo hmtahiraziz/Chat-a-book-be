@@ -6,7 +6,7 @@ FastAPI + LangChain for PDF ingestion, retrieval, and chat.
 
 | Layer | Technology | Contents |
 |-------|------------|----------|
-| **Library** | **MongoDB** (+ GridFS) | Book metadata, PDF binaries, ingest resume state |
+| **Library** | **MongoDB** (+ GridFS) | Book metadata, PDF binaries, ingest resume state, chat sessions |
 | **Vectors** | **Pinecone** | Chunk embeddings (one namespace per book + embedding provider) |
 
 Both `MONGODB_URI` and `PINECONE_API_KEY` are **required** at startup.
@@ -168,6 +168,10 @@ Set `MONGODB_URI` (and optional `MONGODB_DB_NAME`, collection names) in `.env`. 
 
 - `POST /books/ingest` — multipart PDF upload
 - `GET /books` — library list
+- `GET /chat/sessions` — list chat threads (`X-Client-Id` header)
+- `POST /chat/sessions` — create thread
+- `PUT /chat/sessions/{session_id}` — save thread (messages, title)
+- `DELETE /chat/sessions/{session_id}` — delete thread
 - `POST /chat` — RAG chat with history
 - `POST /tts` — OpenAI speech (WAV), requires `OPENAI_API_KEY`
 - `POST /query/classify`

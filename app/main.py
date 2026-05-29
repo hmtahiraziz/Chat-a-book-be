@@ -18,7 +18,13 @@ from app.config import (
     require_mongodb_config,
     require_pinecone_config,
 )
-from app.models import ChatRequest, ClassifyRequest, CreatePineconeIndexRequest, TtsRequest
+from app.models import (
+    ChatRequest,
+    ChatSessionPayload,
+    ClassifyRequest,
+    CreatePineconeIndexRequest,
+    TtsRequest,
+)
 from app.services.book_service import (
     count_books_with_pdf_file_id,
     delete_book as mongo_delete_book,
@@ -28,6 +34,14 @@ from app.services.book_service import (
     read_pdf_bytes,
     store_pdf,
     upsert_book,
+)
+from app.services.chat_session_service import (
+    create_session,
+    delete_session,
+    delete_sessions_by_book_id,
+    get_session,
+    list_sessions,
+    replace_session,
 )
 from app.services.classifier_service import classify_query
 from app.services.document_service import chunk_pages, extract_pages
@@ -73,6 +87,18 @@ def _validate_required_services() -> None:
         require_pinecone_config()
     except RuntimeError as exc:
         raise RuntimeError(f"Startup configuration error: {exc}") from exc
+
+
+def require_client_id(
+    x_client_id: Annotated[str | None, Header(alias="X-Client-Id")] = None,
+) -> str:
+    client_id = (x_client_id or "").strip()
+    if not client_id or len(client_id) > 128:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing or invalid X-Client-Id header (max 128 characters).",
+        )
+    return client_id
 
 
 def verify_admin(x_admin_token: Annotated[str | None, Header()] = None) -> None:
@@ -628,6 +654,7 @@ def delete_book(book_id: str) -> dict[str, Any]:
         control["paused"] = False
 
     mongo_delete_book(book_id)
+    removed_chat_sessions = delete_sessions_by_book_id(book_id)
     clear_book_index_vectors(book_id, embedding_provider)
     removed_progress = delete_progress(book_id)
 
@@ -641,8 +668,59 @@ def delete_book(book_id: str) -> dict[str, Any]:
         "book_id": book_id,
         "removed_pdf": removed_pdf,
         "removed_progress": removed_progress,
+        "removed_chat_sessions": removed_chat_sessions,
         "embedding_provider": embedding_provider,
     }
+
+
+@app.get("/chat/sessions")
+def get_chat_sessions(client_id: Annotated[str, Depends(require_client_id)]) -> dict[str, Any]:
+    return {"sessions": list_sessions(client_id)}
+
+
+@app.post("/chat/sessions", status_code=201)
+def post_chat_session(
+    body: ChatSessionPayload,
+    client_id: Annotated[str, Depends(require_client_id)],
+) -> dict[str, Any]:
+    try:
+        session = create_session(client_id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"session": session}
+
+
+@app.get("/chat/sessions/{session_id}")
+def get_chat_session(
+    session_id: str,
+    client_id: Annotated[str, Depends(require_client_id)],
+) -> dict[str, Any]:
+    session = get_session(client_id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    return {"session": session}
+
+
+@app.put("/chat/sessions/{session_id}")
+def put_chat_session(
+    session_id: str,
+    body: ChatSessionPayload,
+    client_id: Annotated[str, Depends(require_client_id)],
+) -> dict[str, Any]:
+    session = replace_session(client_id, session_id, body.model_dump())
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    return {"session": session}
+
+
+@app.delete("/chat/sessions/{session_id}")
+def remove_chat_session(
+    session_id: str,
+    client_id: Annotated[str, Depends(require_client_id)],
+) -> dict[str, Any]:
+    if not delete_session(client_id, session_id):
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    return {"deleted": True, "session_id": session_id}
 
 
 @app.get("/admin/books/{book_id}/chunks")
