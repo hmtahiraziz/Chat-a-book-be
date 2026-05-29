@@ -32,6 +32,9 @@ MONGODB_PDF_BUCKET = os.getenv("MONGODB_PDF_BUCKET", "pdfs").strip()
 MONGODB_INGEST_PROGRESS_COLLECTION = os.getenv(
     "MONGODB_INGEST_PROGRESS_COLLECTION", "ingest_progress"
 ).strip()
+MONGODB_CHAT_SESSIONS_COLLECTION = os.getenv(
+    "MONGODB_CHAT_SESSIONS_COLLECTION", "chat_sessions"
+).strip()
 
 # Pinecone — required vector store for embeddings
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "").strip()
