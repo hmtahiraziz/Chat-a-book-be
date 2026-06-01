@@ -6,6 +6,43 @@ from app.services.provider_service import Provider, get_chat_model
 from app.services.rag_chat_service import dedupe_docs, format_context_blocks
 from app.services.vector_service import retrieve_from_store
 
+BOOK_SUMMARY_FORMAT_RULES = """
+Format rules (follow exactly):
+- Use exactly four section headings on their own line, each ending with a colon.
+- Headings must be plain text (no markdown #, no **bold**, no numbering like "1)" or "2)").
+- Optional: one short introductory sentence before the first heading (max 2 sentences).
+
+Main Plot:
+<2-4 sentences of plot summary>
+
+Key Characters:
+- <Name>: <one line role/description>
+(list 3-6 characters)
+
+Major Themes:
+- <Theme>: <brief explanation>
+(list 3-5 themes)
+
+Ending / Resolution Overview:
+<2-3 sentences on how the story concludes>
+"""
+
+CHAPTER_SUMMARY_FORMAT_RULES = """
+Format rules (follow exactly):
+- Use exactly three section headings on their own line, each ending with a colon.
+- Plain text headings only (no markdown #, no **bold**, no numbering).
+
+Chapter Overview:
+<2-3 sentences>
+
+Key Events:
+- <event bullet>
+(3-6 bullets)
+
+Notable Details:
+<1-2 sentences or short bullets for tone, quotes, or details>
+"""
+
 
 def _llm(chat_provider: Provider):
     return get_chat_model(chat_provider, temperature=0.2)
@@ -35,8 +72,7 @@ def summarize_book(store: VectorStore, max_docs: int = 30, chat_provider: Provid
     context = format_context_blocks(docs)
     prompt = (
         "Summarize this book using only the excerpts below. If something is missing, omit it rather than inventing.\n"
-        "Structure your answer with:\n"
-        "1) Main plot\n2) Key characters\n3) Major themes\n4) Ending / resolution overview\n\n"
+        f"{BOOK_SUMMARY_FORMAT_RULES}\n\n"
         f"Excerpts:\n{context}"
     )
     return _llm(chat_provider).invoke(prompt).content.strip()
@@ -78,7 +114,8 @@ def summarize_chapter(
     context = format_context_blocks(chapter_docs)
     prompt = (
         f"Summarize {chapter} of this book using only the excerpts below. "
-        "Stay accurate; do not invent scenes or characters not supported by the text.\n\n"
+        "Stay accurate; do not invent scenes or characters not supported by the text.\n"
+        f"{CHAPTER_SUMMARY_FORMAT_RULES}\n\n"
         f"Excerpts:\n{context}"
     )
     return _llm(chat_provider).invoke(prompt).content.strip()
