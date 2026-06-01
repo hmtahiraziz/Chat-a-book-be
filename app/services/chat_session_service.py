@@ -71,7 +71,18 @@ def _from_api(client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 def list_sessions(client_id: str) -> list[dict[str, Any]]:
     cursor = _sessions().find({"client_id": client_id}).sort("updated_at", -1)
-    return [_to_api(doc) for doc in cursor]
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for doc in cursor:
+        session_id = doc.get("id")
+        if not session_id:
+            continue
+        if session_id in seen:
+            _sessions().delete_one({"_id": doc["_id"]})
+            continue
+        seen.add(session_id)
+        out.append(_to_api(doc))
+    return out
 
 
 def get_session(client_id: str, session_id: str) -> dict[str, Any] | None:
@@ -83,7 +94,11 @@ def create_session(client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     record = _from_api(client_id, payload)
     if not record["book_id"]:
         raise ValueError("bookId is required")
-    _sessions().insert_one(record)
+    _sessions().replace_one(
+        {"client_id": client_id, "id": record["id"]},
+        record,
+        upsert=True,
+    )
     return _to_api(record)
 
 
