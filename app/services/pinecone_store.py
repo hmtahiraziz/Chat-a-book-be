@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from typing import Any, List
 
 from langchain_core.documents import Document
 from pinecone import NotFoundException, Pinecone, ServerlessSpec
 
-from app.config import PINECONE_API_KEY, pinecone_index_name_for_provider
+from app.config import CHUNK_LIST_CACHE_TTL_SECONDS, PINECONE_API_KEY, pinecone_index_name_for_provider
 from app.services.provider_service import Provider
 
 _pinecone_client: Pinecone | None = None
 _index_cache: dict[str, Any] = {}
+
+# Sorted chunk vector IDs per namespace (list IDs only — cheap vs full metadata fetch).
+_namespace_id_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+_namespace_id_cache_lock = threading.Lock()
+
+_CHUNK_ID_RE = re.compile(r"^c(\d+)$", re.IGNORECASE)
 
 
 def _pc() -> Pinecone:
@@ -43,6 +51,25 @@ def pinecone_namespace(book_id: str, embedding_provider: Provider) -> str:
 
 def chunk_id(global_ordinal: int) -> str:
     return f"c{global_ordinal:08d}"
+
+
+def chunk_id_sort_key(vid: str) -> tuple[int, str]:
+    """Sort key for ingest IDs (c00000042) with stable fallback for legacy IDs."""
+    m = _CHUNK_ID_RE.match(vid)
+    if m:
+        return (int(m.group(1)), vid)
+    return (10**9, vid)
+
+
+def sort_chunk_ids(ids: list[str]) -> list[str]:
+    return sorted(ids, key=chunk_id_sort_key)
+
+
+def invalidate_namespace_chunk_cache(provider: Provider, namespace: str) -> None:
+    """Drop cached ID list after ingest, delete, or re-index."""
+    key = (provider, namespace)
+    with _namespace_id_cache_lock:
+        _namespace_id_cache.pop(key, None)
 
 
 def _parse_pinecone_dimension_mismatch(exc: BaseException) -> tuple[str | None, str | None]:
@@ -131,7 +158,9 @@ def delete_namespace(provider: Provider, namespace: str) -> None:
         idx.delete(delete_all=True, namespace=namespace)
     except NotFoundException:
         # Index missing (renamed, deleted, or wrong PINECONE_INDEX_* env); vectors are already gone.
-        return
+        pass
+    finally:
+        invalidate_namespace_chunk_cache(provider, namespace)
 
 
 def create_serverless_pinecone_index(
@@ -171,25 +200,40 @@ def list_all_ids(provider: Provider, namespace: str) -> List[str]:
     return out
 
 
-def fetch_documents_page(
+def get_sorted_chunk_ids(provider: Provider, namespace: str) -> list[str]:
+    """Return sorted chunk vector IDs, with TTL cache (list-only, no metadata fetch)."""
+    key = (provider, namespace)
+    now = time.monotonic()
+    ttl = max(30, CHUNK_LIST_CACHE_TTL_SECONDS)
+
+    with _namespace_id_cache_lock:
+        cached = _namespace_id_cache.get(key)
+        if cached is not None:
+            expires_at, ids = cached
+            if now < expires_at and ids:
+                return ids
+
+    ids = sort_chunk_ids(list_all_ids(provider, namespace))
+    with _namespace_id_cache_lock:
+        _namespace_id_cache[key] = (now + ttl, ids)
+    return ids
+
+
+def _fetch_vectors_by_ids(
     provider: Provider,
     namespace: str,
+    ids: list[str],
     *,
-    offset: int,
-    limit: int,
     text_key: str = "text",
-) -> tuple[list[dict[str, Any]], int]:
-    """List chunks by listing IDs, fetch metadata, sort by chunk_ordinal, paginate."""
-    all_ids = list_all_ids(provider, namespace)
-    if not all_ids:
-        return [], 0
+) -> list[tuple[int, str, Document]]:
+    if not ids:
+        return []
 
     idx = get_raw_index(provider)
     fetched: list[tuple[int, str, Document]] = []
-
     batch_size = 100
-    for i in range(0, len(all_ids), batch_size):
-        batch = all_ids[i : i + batch_size]
+    for i in range(0, len(ids), batch_size):
+        batch = ids[i : i + batch_size]
         res = idx.fetch(ids=batch, namespace=namespace)
         vecs = res.vectors or {}
         for vid in batch:
@@ -203,16 +247,37 @@ def fetch_documents_page(
                 ordinal = int(ord_key) if ord_key is not None else -1
             except (TypeError, ValueError):
                 ordinal = -1
+            if ordinal < 0:
+                key_ord = chunk_id_sort_key(vid)[0]
+                ordinal = key_ord if key_ord < 10**9 else -1
             doc_meta = {k: v for k, v in meta.items() if k not in (text_key, "chunk_ordinal")}
             doc = Document(page_content=str(text), metadata=doc_meta)
             fetched.append((ordinal, vid, doc))
 
     fetched.sort(key=lambda x: (x[0] if x[0] >= 0 else 10**9, x[1]))
-    total = len(fetched)
-    window = fetched[offset : offset + limit]
+    return fetched
+
+
+def fetch_documents_page(
+    provider: Provider,
+    namespace: str,
+    *,
+    offset: int,
+    limit: int,
+    text_key: str = "text",
+) -> tuple[list[dict[str, Any]], int]:
+    """Paginate chunks: cache sorted IDs, fetch metadata only for the requested window."""
+    all_ids = get_sorted_chunk_ids(provider, namespace)
+    if not all_ids:
+        return [], 0
+
+    total = len(all_ids)
+    page_ids = all_ids[offset : offset + limit]
+    window = _fetch_vectors_by_ids(provider, namespace, page_ids, text_key=text_key)
+
     chunks: list[dict[str, Any]] = []
     for rank, (ordinal, vid, doc) in enumerate(window):
-        chunk_index = ordinal if ordinal >= 0 else rank
+        chunk_index = ordinal if ordinal >= 0 else offset + rank
         chunks.append(
             {
                 "ordinal": offset + rank + 1,
@@ -224,3 +289,22 @@ def fetch_documents_page(
             }
         )
     return chunks, total
+
+
+def fetch_chunk_texts_page(
+    provider: Provider,
+    namespace: str,
+    *,
+    offset: int,
+    limit: int,
+    text_key: str = "text",
+) -> tuple[list[str], int]:
+    """Lightweight pagination for TTS: text only, same ID cache as fetch_documents_page."""
+    all_ids = get_sorted_chunk_ids(provider, namespace)
+    if not all_ids:
+        return [], 0
+
+    total = len(all_ids)
+    page_ids = all_ids[offset : offset + limit]
+    window = _fetch_vectors_by_ids(provider, namespace, page_ids, text_key=text_key)
+    return [doc.page_content for _ord, _vid, doc in window], total

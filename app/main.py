@@ -58,6 +58,8 @@ from app.services.tts_service import synthesize_openai_tts_wav
 from app.services.vector_service import (
     clear_book_index_vectors,
     index_exists,
+    invalidate_book_chunk_cache,
+    list_book_chunk_texts_page,
     list_book_documents_page,
     load_book_store,
 )
@@ -614,6 +616,7 @@ async def ingest_book(
             chapters=chapters,
             embedding_provider=embedding_provider,
         )
+        invalidate_book_chunk_cache(book_id, embedding_provider)
 
     final = ingest_status[safe_name]
     return {
@@ -723,13 +726,11 @@ def remove_chat_session(
     return {"deleted": True, "session_id": session_id}
 
 
-@app.get("/admin/books/{book_id}/chunks")
-def admin_list_book_chunks(
+def _chunks_list_response(
     book_id: str,
-    embedding_provider: Provider = "openai",
-    offset: int = 0,
-    limit: int = 50,
-    _admin: None = Depends(verify_admin),
+    embedding_provider: Provider,
+    offset: int,
+    limit: int,
 ) -> dict[str, Any]:
     if not get_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found in library.")
@@ -753,6 +754,80 @@ def admin_list_book_chunks(
         "returned": len(chunks),
         "chunks": chunks,
     }
+
+
+def _chunks_text_response(
+    book_id: str,
+    embedding_provider: Provider,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    if not get_book(book_id):
+        raise HTTPException(status_code=404, detail="Book not found in library.")
+    try:
+        texts, total = list_book_chunk_texts_page(
+            book_id,
+            embedding_provider=embedding_provider,
+            offset=offset,
+            limit=limit,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "book_id": book_id,
+        "embedding_provider": embedding_provider,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "returned": len(texts),
+        "texts": texts,
+    }
+
+
+@app.get("/books/{book_id}/chunks")
+def list_book_chunks(
+    book_id: str,
+    embedding_provider: Provider = "openai",
+    offset: int = 0,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Paginated chunk listing for library UI and tools (no admin token)."""
+    return _chunks_list_response(book_id, embedding_provider, offset, limit)
+
+
+@app.get("/books/{book_id}/chunks/text")
+def list_book_chunk_texts(
+    book_id: str,
+    embedding_provider: Provider = "openai",
+    offset: int = 0,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Lightweight paginated chunk text for TTS / read-aloud (fetches only one page from Pinecone)."""
+    return _chunks_text_response(book_id, embedding_provider, offset, limit)
+
+
+@app.get("/admin/books/{book_id}/chunks")
+def admin_list_book_chunks(
+    book_id: str,
+    embedding_provider: Provider = "openai",
+    offset: int = 0,
+    limit: int = 50,
+    _admin: None = Depends(verify_admin),
+) -> dict[str, Any]:
+    return _chunks_list_response(book_id, embedding_provider, offset, limit)
+
+
+@app.get("/admin/books/{book_id}/chunks/text")
+def admin_list_book_chunk_texts(
+    book_id: str,
+    embedding_provider: Provider = "openai",
+    offset: int = 0,
+    limit: int = 200,
+    _admin: None = Depends(verify_admin),
+) -> dict[str, Any]:
+    return _chunks_text_response(book_id, embedding_provider, offset, limit)
 
 
 @app.get("/books/{book_id}/pdf")

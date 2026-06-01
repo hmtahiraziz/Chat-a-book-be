@@ -17,6 +17,11 @@ OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "900"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
 
+# Chunk listing: cache sorted Pinecone vector IDs per namespace (seconds).
+CHUNK_LIST_CACHE_TTL_SECONDS = int(os.getenv("CHUNK_LIST_CACHE_TTL_SECONDS", "300"))
+CHUNKS_PAGE_MAX_LIMIT = int(os.getenv("CHUNKS_PAGE_MAX_LIMIT", "200"))
+CHUNKS_TEXT_PAGE_MAX_LIMIT = int(os.getenv("CHUNKS_TEXT_PAGE_MAX_LIMIT", "500"))
+
 # RAG retrieval: MMR over a wider candidate pool for more diverse context
 RAG_FETCH_K_MAX = int(os.getenv("RAG_FETCH_K_MAX", "48"))
 RAG_MMR_LAMBDA = float(os.getenv("RAG_MMR_LAMBDA", "0.55"))
