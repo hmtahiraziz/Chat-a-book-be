@@ -103,8 +103,12 @@ def _user_owner_id(user: dict[str, Any]) -> str:
     return str(user["user_id"])
 
 
-def _can_access_book(_user: dict[str, Any], _entry: dict[str, Any]) -> bool:
-    """All authenticated users can access every ingested book (for now)."""
+def _can_access_book(user: dict[str, Any], entry: dict[str, Any]) -> bool:
+    from app.services.demo_service import demo_book_id_or_none, is_demo_user
+
+    if is_demo_user(user):
+        demo_id = demo_book_id_or_none()
+        return bool(demo_id and entry.get("book_id") == demo_id)
     return True
 
 
@@ -304,6 +308,9 @@ async def ingest_book(
     max_retries: int = 3,
     user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, Any]:
+    from app.services.demo_service import enforce_not_demo_user
+
+    enforce_not_demo_user(user, action="upload or index books")
     enforce_book_limit(user)
     owner_id = _user_owner_id(user)
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -649,8 +656,11 @@ async def ingest_book(
 
 
 @app.get("/books")
-def get_books(_user: dict[str, Any] = Depends(require_active_subscription)) -> dict[str, Any]:
-    return {"books": list(list_books().values())}
+def get_books(user: dict[str, Any] = Depends(require_active_subscription)) -> dict[str, Any]:
+    from app.services.demo_service import filter_books_for_user
+
+    books = list(list_books().values())
+    return {"books": filter_books_for_user(user, books)}
 
 
 @app.delete("/books/{book_id}")
@@ -663,6 +673,10 @@ def delete_book(
         raise HTTPException(status_code=404, detail="Book not found in library.")
     if not _can_access_book(user, entry):
         raise HTTPException(status_code=403, detail="You do not have access to this book.")
+
+    from app.services.demo_service import enforce_not_demo_user
+
+    enforce_not_demo_user(user, action="delete books")
 
     embedding_provider: Provider = entry.get("embedding_provider") or "openai"
     filename_for_ingest = entry.get("filename") or ""

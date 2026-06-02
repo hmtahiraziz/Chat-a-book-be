@@ -127,6 +127,7 @@ class UserPublic(BaseModel):
     email: str
     name: str = ""
     role: UserRole = "user"
+    is_demo: bool = False
     subscription: SubscriptionPublic
     created_at: int | None = None
 
