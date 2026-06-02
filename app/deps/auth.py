@@ -10,6 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.config import ADMIN_API_TOKEN
 from app.services.auth_service import decode_access_token
 from app.services.subscription_plans import plan_limits
+from app.services.demo_service import is_demo_user
 from app.services.user_service import get_user_by_id, has_active_subscription, user_plan_id
 
 _bearer = HTTPBearer(auto_error=False)
@@ -69,7 +70,7 @@ async def require_admin_user(
 
 
 def enforce_book_limit(user: dict[str, Any]) -> None:
-    if user.get("role") == "admin":
+    if user.get("role") == "admin" or is_demo_user(user):
         return
     plan_id = user_plan_id(user)
     limits = plan_limits(plan_id)
