@@ -94,3 +94,52 @@ class CreatePineconeIndexRequest(BaseModel):
             return 3072
         assert self.dimension is not None
         return self.dimension
+
+
+PlanId = Literal["starter", "pro"]
+UserRole = Literal["user", "admin"]
+SubscriptionStatus = Literal["inactive", "active", "cancelled"]
+
+
+class RegisterRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+    password: str = Field(..., min_length=8, max_length=128)
+    name: str = Field(default="", max_length=120)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class SubscribeRequest(BaseModel):
+    plan_id: PlanId
+
+
+class SubscriptionPublic(BaseModel):
+    plan_id: PlanId | None = None
+    status: SubscriptionStatus = "inactive"
+    subscribed_at: int | None = None
+
+
+class UserPublic(BaseModel):
+    user_id: str
+    email: str
+    name: str = ""
+    role: UserRole = "user"
+    subscription: SubscriptionPublic
+    created_at: int | None = None
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserPublic
+
+
+class DemoLoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserPublic
+    demo_book_id: str | None = None
+    demo_book_label: str | None = None

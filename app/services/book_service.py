@@ -50,8 +50,15 @@ def upsert_book(book_id: str, payload: dict[str, Any]) -> None:
     _books().update_one({"book_id": book_id}, {"$set": record}, upsert=True)
 
 
-def list_books() -> dict[str, dict[str, Any]]:
-    return {doc["book_id"]: _serialize(doc) for doc in _books().find()}
+def list_books(*, owner_id: str | None = None) -> dict[str, dict[str, Any]]:
+    query: dict[str, Any] = {}
+    if owner_id is not None:
+        query["owner_id"] = owner_id
+    return {doc["book_id"]: _serialize(doc) for doc in _books().find(query)}
+
+
+def count_books_for_owner(owner_id: str) -> int:
+    return _books().count_documents({"owner_id": owner_id})
 
 
 def get_book(book_id: str) -> dict[str, Any] | None:

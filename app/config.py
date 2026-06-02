@@ -40,6 +40,17 @@ MONGODB_INGEST_PROGRESS_COLLECTION = os.getenv(
 MONGODB_CHAT_SESSIONS_COLLECTION = os.getenv(
     "MONGODB_CHAT_SESSIONS_COLLECTION", "chat_sessions"
 ).strip()
+MONGODB_USERS_COLLECTION = os.getenv("MONGODB_USERS_COLLECTION", "users").strip()
+
+# JWT authentication
+JWT_SECRET = os.getenv("JWT_SECRET", "").strip() or "dev-change-me-in-production"
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256").strip()
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "10080"))  # 7 days
+
+# Demo experience (landing page — no signup)
+DEMO_USER_EMAIL = os.getenv("DEMO_USER_EMAIL", "demo@bookchat.local").strip().lower()
+# Optional: exact book_id for demo; otherwise first filename containing "harry" + "potter"
+DEMO_BOOK_ID = os.getenv("DEMO_BOOK_ID", "").strip()
 
 # Pinecone — required vector store for embeddings
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "").strip()

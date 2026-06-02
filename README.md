@@ -46,6 +46,40 @@ Set `MONGODB_URI` (and optional `MONGODB_DB_NAME`, collection names) in `.env`. 
 - Query classification and intent-aware chat (MMR retrieval)
 - Book / chapter summaries
 - Optional OpenAI speech (`POST /tts`)
+- **JWT authentication** — register, login, and subscription plans (`starter` / `pro`)
+- Mock subscription checkout (no payment gateway)
+
+## Authentication & subscriptions
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /auth/register` | Create account |
+| `POST /auth/login` | Returns JWT bearer token |
+| `GET /auth/me` | Current user (requires `Authorization: Bearer …`) |
+| `GET /auth/plans` | List plans (public) |
+| `POST /auth/subscribe` | Activate plan (mock — no payment) |
+
+Workspace routes (`/books/*`, `/chat/*`, ingest, TTS) require a signed-in user with an **active** subscription. Admins bypass plan limits.
+
+**Seed the default admin** (after MongoDB is configured):
+
+```bash
+source venv/bin/activate
+pip install -r requirements.txt   # includes python-jose, passlib
+python scripts/seed_admin.py
+```
+
+Defaults: `admin@bookchat.local` / `Admin123!` (override with `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`).
+
+**Seed the demo account** (landing page “Try demo”, no signup):
+
+```bash
+python scripts/seed_demo.py
+```
+
+Uses `demo@bookchat.local` with Pro subscription. `POST /auth/demo-login` issues a JWT with no password. The demo book is auto-detected (filename containing “harry” and “potter”) or set `DEMO_BOOK_ID` in `.env`.
+
+Set `JWT_SECRET` in `.env` for production.
 
 ## Prerequisites
 

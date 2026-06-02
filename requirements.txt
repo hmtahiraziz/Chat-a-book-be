@@ -12,3 +12,6 @@ openai
 langchain-pinecone
 pinecone-client
 pydantic
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt<5

@@ -1,4 +1,4 @@
-"""Chat threads persisted in MongoDB (scoped by client_id)."""
+"""Chat threads persisted in MongoDB (scoped by owner_id / user_id)."""
 
 from __future__ import annotations
 
@@ -52,11 +52,11 @@ def _to_api(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _from_api(client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _from_api(owner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     messages = payload.get("messages") or []
     return {
         "id": str(payload.get("id") or uuid.uuid4()),
-        "client_id": client_id,
+        "owner_id": owner_id,
         "book_id": str(payload.get("bookId") or payload.get("book_id", "")),
         "book_label": str(payload.get("bookLabel") or payload.get("book_label", "")),
         "embedding_provider": payload.get("embeddingProvider")
@@ -69,8 +69,12 @@ def _from_api(client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def list_sessions(client_id: str) -> list[dict[str, Any]]:
-    cursor = _sessions().find({"client_id": client_id}).sort("updated_at", -1)
+def _owner_query(owner_id: str) -> dict[str, Any]:
+    return {"$or": [{"owner_id": owner_id}, {"client_id": owner_id}]}
+
+
+def list_sessions(owner_id: str) -> list[dict[str, Any]]:
+    cursor = _sessions().find(_owner_query(owner_id)).sort("updated_at", -1)
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for doc in cursor:
@@ -85,34 +89,34 @@ def list_sessions(client_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def get_session(client_id: str, session_id: str) -> dict[str, Any] | None:
-    doc = _sessions().find_one({"client_id": client_id, "id": session_id})
+def get_session(owner_id: str, session_id: str) -> dict[str, Any] | None:
+    doc = _sessions().find_one({**_owner_query(owner_id), "id": session_id})
     return _to_api(doc) if doc else None
 
 
-def create_session(client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    record = _from_api(client_id, payload)
+def create_session(owner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    record = _from_api(owner_id, payload)
     if not record["book_id"]:
         raise ValueError("bookId is required")
     _sessions().replace_one(
-        {"client_id": client_id, "id": record["id"]},
+        {"owner_id": owner_id, "id": record["id"]},
         record,
         upsert=True,
     )
     return _to_api(record)
 
 
-def replace_session(client_id: str, session_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-    existing = _sessions().find_one({"client_id": client_id, "id": session_id})
+def replace_session(owner_id: str, session_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    existing = _sessions().find_one({**_owner_query(owner_id), "id": session_id})
     if not existing:
         return None
-    record = _from_api(client_id, {**payload, "id": session_id})
-    _sessions().replace_one({"client_id": client_id, "id": session_id}, record)
+    record = _from_api(owner_id, {**payload, "id": session_id})
+    _sessions().replace_one({"owner_id": owner_id, "id": session_id}, record)
     return _to_api(record)
 
 
-def delete_session(client_id: str, session_id: str) -> bool:
-    result = _sessions().delete_one({"client_id": client_id, "id": session_id})
+def delete_session(owner_id: str, session_id: str) -> bool:
+    result = _sessions().delete_one({**_owner_query(owner_id), "id": session_id})
     return result.deleted_count > 0
 
 

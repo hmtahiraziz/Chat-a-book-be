@@ -18,6 +18,13 @@ from app.config import (
     require_mongodb_config,
     require_pinecone_config,
 )
+from app.deps.auth import (
+    enforce_book_limit,
+    enforce_tts_allowed,
+    require_active_subscription,
+    require_admin_user,
+)
+from app.routers import auth as auth_router
 from app.models import (
     ChatRequest,
     ChatSessionPayload,
@@ -65,6 +72,7 @@ from app.services.vector_service import (
 )
 
 app = FastAPI(title="BookChat API (LangChain)")
+app.include_router(auth_router.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -91,16 +99,13 @@ def _validate_required_services() -> None:
         raise RuntimeError(f"Startup configuration error: {exc}") from exc
 
 
-def require_client_id(
-    x_client_id: Annotated[str | None, Header(alias="X-Client-Id")] = None,
-) -> str:
-    client_id = (x_client_id or "").strip()
-    if not client_id or len(client_id) > 128:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing or invalid X-Client-Id header (max 128 characters).",
-        )
-    return client_id
+def _user_owner_id(user: dict[str, Any]) -> str:
+    return str(user["user_id"])
+
+
+def _can_access_book(_user: dict[str, Any], _entry: dict[str, Any]) -> bool:
+    """All authenticated users can access every ingested book (for now)."""
+    return True
 
 
 def verify_admin(x_admin_token: Annotated[str | None, Header()] = None) -> None:
@@ -181,7 +186,7 @@ def server_info() -> dict[str, Any]:
 @app.post("/admin/pinecone/index")
 def admin_create_pinecone_index(
     body: CreatePineconeIndexRequest,
-    _admin: None = Depends(verify_admin),
+    _user: dict[str, Any] = Depends(require_admin_user),
 ) -> dict[str, Any]:
     if not PINECONE_API_KEY:
         raise HTTPException(
@@ -217,7 +222,10 @@ def admin_create_pinecone_index(
 
 
 @app.get("/ingest/status")
-def get_ingest_status(filename: str | None = None) -> dict[str, Any]:
+def get_ingest_status(
+    filename: str | None = None,
+    _user: dict[str, Any] = Depends(require_active_subscription),
+) -> dict[str, Any]:
     if filename:
         safe_name = _sanitize_filename(filename)
         status = ingest_status.get(safe_name)
@@ -234,7 +242,11 @@ def get_ingest_status(filename: str | None = None) -> dict[str, Any]:
 
 
 @app.post("/ingest/control")
-def control_ingest(filename: str, action: str) -> dict[str, Any]:
+def control_ingest(
+    filename: str,
+    action: str,
+    _user: dict[str, Any] = Depends(require_active_subscription),
+) -> dict[str, Any]:
     safe_name = _sanitize_filename(filename)
     control = ingest_control.setdefault(safe_name, {"paused": False, "stop": False})
 
@@ -261,21 +273,22 @@ def _upsert_book_record(
     chunks: int,
     chapters: list[str],
     embedding_provider: Provider,
+    owner_id: str | None = None,
 ) -> None:
-    upsert_book(
-        book_id,
-        {
-            "book_id": book_id,
-            "filename": library_filename,
-            "base_book_id": base_book_id,
-            "pdf_file_id": pdf_file_id,
-            "pages": pages,
-            "chunks": chunks,
-            "chapters": chapters,
-            "indexed_at": int(time.time()),
-            "embedding_provider": embedding_provider,
-        },
-    )
+    payload: dict[str, Any] = {
+        "book_id": book_id,
+        "filename": library_filename,
+        "base_book_id": base_book_id,
+        "pdf_file_id": pdf_file_id,
+        "pages": pages,
+        "chunks": chunks,
+        "chapters": chapters,
+        "indexed_at": int(time.time()),
+        "embedding_provider": embedding_provider,
+    }
+    if owner_id:
+        payload["owner_id"] = owner_id
+    upsert_book(book_id, payload)
 
 
 @app.post("/books/ingest")
@@ -289,7 +302,10 @@ async def ingest_book(
     batch_size: int | None = None,
     requests_per_second: float | None = None,
     max_retries: int = 3,
+    user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, Any]:
+    enforce_book_limit(user)
+    owner_id = _user_owner_id(user)
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
     if max_pages is not None and max_pages <= 0:
@@ -403,6 +419,7 @@ async def ingest_book(
             chunks=len(docs),
             chapters=chapters,
             embedding_provider=embedding_provider,
+            owner_id=owner_id,
         )
         return {
             "filename": safe_name,
@@ -615,6 +632,7 @@ async def ingest_book(
             chunks=len(docs),
             chapters=chapters,
             embedding_provider=embedding_provider,
+            owner_id=owner_id,
         )
         invalidate_book_chunk_cache(book_id, embedding_provider)
 
@@ -631,15 +649,20 @@ async def ingest_book(
 
 
 @app.get("/books")
-def get_books() -> dict[str, Any]:
+def get_books(_user: dict[str, Any] = Depends(require_active_subscription)) -> dict[str, Any]:
     return {"books": list(list_books().values())}
 
 
 @app.delete("/books/{book_id}")
-def delete_book(book_id: str) -> dict[str, Any]:
+def delete_book(
+    book_id: str,
+    user: dict[str, Any] = Depends(require_active_subscription),
+) -> dict[str, Any]:
     entry = get_book(book_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Book not found in library.")
+    if not _can_access_book(user, entry):
+        raise HTTPException(status_code=403, detail="You do not have access to this book.")
 
     embedding_provider: Provider = entry.get("embedding_provider") or "openai"
     filename_for_ingest = entry.get("filename") or ""
@@ -677,17 +700,19 @@ def delete_book(book_id: str) -> dict[str, Any]:
 
 
 @app.get("/chat/sessions")
-def get_chat_sessions(client_id: Annotated[str, Depends(require_client_id)]) -> dict[str, Any]:
-    return {"sessions": list_sessions(client_id)}
+def get_chat_sessions(user: dict[str, Any] = Depends(require_active_subscription)) -> dict[str, Any]:
+    owner_id = _user_owner_id(user)
+    return {"sessions": list_sessions(owner_id)}
 
 
 @app.post("/chat/sessions", status_code=201)
 def post_chat_session(
     body: ChatSessionPayload,
-    client_id: Annotated[str, Depends(require_client_id)],
+    user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, Any]:
+    owner_id = _user_owner_id(user)
     try:
-        session = create_session(client_id, body.model_dump())
+        session = create_session(owner_id, body.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"session": session}
@@ -696,9 +721,10 @@ def post_chat_session(
 @app.get("/chat/sessions/{session_id}")
 def get_chat_session(
     session_id: str,
-    client_id: Annotated[str, Depends(require_client_id)],
+    user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, Any]:
-    session = get_session(client_id, session_id)
+    owner_id = _user_owner_id(user)
+    session = get_session(owner_id, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Chat session not found.")
     return {"session": session}
@@ -708,9 +734,10 @@ def get_chat_session(
 def put_chat_session(
     session_id: str,
     body: ChatSessionPayload,
-    client_id: Annotated[str, Depends(require_client_id)],
+    user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, Any]:
-    session = replace_session(client_id, session_id, body.model_dump())
+    owner_id = _user_owner_id(user)
+    session = replace_session(owner_id, session_id, body.model_dump())
     if not session:
         raise HTTPException(status_code=404, detail="Chat session not found.")
     return {"session": session}
@@ -719,9 +746,10 @@ def put_chat_session(
 @app.delete("/chat/sessions/{session_id}")
 def remove_chat_session(
     session_id: str,
-    client_id: Annotated[str, Depends(require_client_id)],
+    user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, Any]:
-    if not delete_session(client_id, session_id):
+    owner_id = _user_owner_id(user)
+    if not delete_session(owner_id, session_id):
         raise HTTPException(status_code=404, detail="Chat session not found.")
     return {"deleted": True, "session_id": session_id}
 
@@ -731,9 +759,13 @@ def _chunks_list_response(
     embedding_provider: Provider,
     offset: int,
     limit: int,
+    user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not get_book(book_id):
+    entry = get_book(book_id)
+    if not entry:
         raise HTTPException(status_code=404, detail="Book not found in library.")
+    if user is not None and not _can_access_book(user, entry):
+        raise HTTPException(status_code=403, detail="You do not have access to this book.")
     try:
         chunks, total = list_book_documents_page(
             book_id,
@@ -761,9 +793,13 @@ def _chunks_text_response(
     embedding_provider: Provider,
     offset: int,
     limit: int,
+    user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not get_book(book_id):
+    entry = get_book(book_id)
+    if not entry:
         raise HTTPException(status_code=404, detail="Book not found in library.")
+    if user is not None and not _can_access_book(user, entry):
+        raise HTTPException(status_code=403, detail="You do not have access to this book.")
     try:
         texts, total = list_book_chunk_texts_page(
             book_id,
@@ -792,9 +828,10 @@ def list_book_chunks(
     embedding_provider: Provider = "openai",
     offset: int = 0,
     limit: int = 50,
+    user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, Any]:
     """Paginated chunk listing for library UI and tools (no admin token)."""
-    return _chunks_list_response(book_id, embedding_provider, offset, limit)
+    return _chunks_list_response(book_id, embedding_provider, offset, limit, user=user)
 
 
 @app.get("/books/{book_id}/chunks/text")
@@ -803,9 +840,10 @@ def list_book_chunk_texts(
     embedding_provider: Provider = "openai",
     offset: int = 0,
     limit: int = 200,
+    user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, Any]:
     """Lightweight paginated chunk text for TTS / read-aloud (fetches only one page from Pinecone)."""
-    return _chunks_text_response(book_id, embedding_provider, offset, limit)
+    return _chunks_text_response(book_id, embedding_provider, offset, limit, user=user)
 
 
 @app.get("/admin/books/{book_id}/chunks")
@@ -814,7 +852,7 @@ def admin_list_book_chunks(
     embedding_provider: Provider = "openai",
     offset: int = 0,
     limit: int = 50,
-    _admin: None = Depends(verify_admin),
+    user: dict[str, Any] = Depends(require_admin_user),
 ) -> dict[str, Any]:
     return _chunks_list_response(book_id, embedding_provider, offset, limit)
 
@@ -825,16 +863,21 @@ def admin_list_book_chunk_texts(
     embedding_provider: Provider = "openai",
     offset: int = 0,
     limit: int = 200,
-    _admin: None = Depends(verify_admin),
+    user: dict[str, Any] = Depends(require_admin_user),
 ) -> dict[str, Any]:
     return _chunks_text_response(book_id, embedding_provider, offset, limit)
 
 
 @app.get("/books/{book_id}/pdf")
-def get_book_pdf(book_id: str) -> Response:
+def get_book_pdf(
+    book_id: str,
+    user: dict[str, Any] = Depends(require_active_subscription),
+) -> Response:
     entry = get_book(book_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Book not found in library.")
+    if not _can_access_book(user, entry):
+        raise HTTPException(status_code=403, detail="You do not have access to this book.")
     pdf_file_id = entry.get("pdf_file_id")
     if not pdf_file_id:
         raise HTTPException(status_code=404, detail="No PDF stored for this book.")
@@ -852,7 +895,11 @@ def get_book_pdf(book_id: str) -> Response:
 
 
 @app.post("/tts")
-def text_to_speech(body: TtsRequest) -> Response:
+def text_to_speech(
+    body: TtsRequest,
+    user: dict[str, Any] = Depends(require_active_subscription),
+) -> Response:
+    enforce_tts_allowed(user)
     try:
         wav = synthesize_openai_tts_wav(body.text, voice_name=body.voice)
         return Response(content=wav, media_type="audio/wav")
@@ -863,7 +910,10 @@ def text_to_speech(body: TtsRequest) -> Response:
 
 
 @app.post("/query/classify")
-def classify(body: ClassifyRequest) -> dict[str, str]:
+def classify(
+    body: ClassifyRequest,
+    _user: dict[str, Any] = Depends(require_active_subscription),
+) -> dict[str, str]:
     try:
         label = classify_query(body.question, chat_provider=body.chat_provider)
         return {"question": body.question, "classification": label}
@@ -873,8 +923,16 @@ def classify(body: ClassifyRequest) -> dict[str, str]:
 
 @app.get("/books/{book_id}/summary")
 def get_book_summary(
-    book_id: str, embedding_provider: Provider = "openai", chat_provider: Provider = "openai"
+    book_id: str,
+    embedding_provider: Provider = "openai",
+    chat_provider: Provider = "openai",
+    user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, str]:
+    entry = get_book(book_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Book not found in library.")
+    if not _can_access_book(user, entry):
+        raise HTTPException(status_code=403, detail="You do not have access to this book.")
     try:
         store = load_book_store(book_id, embedding_provider=embedding_provider)
         return {"book_id": book_id, "summary": summarize_book(store, chat_provider=chat_provider)}
@@ -890,7 +948,13 @@ def get_chapter_summary(
     chapter: str,
     embedding_provider: Provider = "openai",
     chat_provider: Provider = "openai",
+    user: dict[str, Any] = Depends(require_active_subscription),
 ) -> dict[str, str]:
+    entry = get_book(book_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Book not found in library.")
+    if not _can_access_book(user, entry):
+        raise HTTPException(status_code=403, detail="You do not have access to this book.")
     try:
         store = load_book_store(book_id, embedding_provider=embedding_provider)
         return {
@@ -905,7 +969,15 @@ def get_chapter_summary(
 
 
 @app.post("/chat")
-def chat(body: ChatRequest) -> dict[str, Any]:
+def chat(
+    body: ChatRequest,
+    user: dict[str, Any] = Depends(require_active_subscription),
+) -> dict[str, Any]:
+    entry = get_book(body.book_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Book not found in library.")
+    if not _can_access_book(user, entry):
+        raise HTTPException(status_code=403, detail="You do not have access to this book.")
     try:
         intent = classify_query(body.question, chat_provider=body.chat_provider)
         store = load_book_store(body.book_id, embedding_provider=body.embedding_provider)
