@@ -16,7 +16,7 @@ from app.models import (
     UserPublic,
 )
 from app.services.auth_service import create_access_token
-from app.services.demo_service import ensure_demo_user, resolve_demo_book
+from app.services.demo_service import ensure_demo_user, is_demo_user, resolve_demo_book
 from app.services.subscription_plans import PlanId, list_plans_public
 from app.services.user_service import (
     authenticate_user,
@@ -35,6 +35,7 @@ def _to_user_public(doc: dict[str, Any]) -> UserPublic:
         email=doc["email"],
         name=doc.get("name", ""),
         role=doc.get("role", "user"),
+        is_demo=is_demo_user(doc),
         subscription={
             "plan_id": sub.get("plan_id"),
             "status": sub.get("status", "inactive"),
@@ -132,6 +133,11 @@ def subscribe(
     user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> UserPublic:
     """Mock subscription — activates plan without payment."""
+    if is_demo_user(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Demo accounts cannot change subscription. Register for a full account.",
+        )
     try:
         updated = subscribe_user(user["user_id"], body.plan_id)  # type: ignore[arg-type]
     except ValueError as exc:
@@ -147,6 +153,11 @@ def mock_checkout(
     user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> UserPublic:
     """Alias for mock payment UI — same as /auth/subscribe."""
+    if is_demo_user(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Demo accounts cannot change subscription. Register for a full account.",
+        )
     try:
         updated = subscribe_user(user["user_id"], body.plan_id)  # type: ignore[arg-type]
     except ValueError as exc:
